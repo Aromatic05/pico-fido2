@@ -204,6 +204,16 @@ SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.
 SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless build
 ```
 
+For the reversible hardware bring-up image, use the guarded helper after activating ESP-IDF 5.5:
+
+```bash
+./tools/esp32s3_bringup.sh build
+# Later, with a board connected:
+./tools/esp32s3_bringup.sh flash /dev/ttyACM0
+```
+
+The helper refuses to flash unless development root keys are enabled and both Secure Boot and Flash Encryption are disabled.
+
 Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. Wi-Fi configuration is kept in RAM for this bring-up mode. Production firmware should only enable commissioning after deliberate physical user presence.
 
 ### Native host emulation

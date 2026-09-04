@@ -1,6 +1,7 @@
 # Build directories
 build/
 build_release/
+build-*/
 
 # CMake
 CMakeCache.txt
@@ -40,5 +41,8 @@ compile_commands.json
 # ESP-IDF
 sdkconfig
 sdkconfig.old
+sdkconfig.*
+!sdkconfig.*.defaults
+!sdkconfig.defaults
 managed_components/
 dependencies.lock
