@@ -320,6 +320,14 @@ PIV compatibility can be exercised against the same native emulator through a co
 
 The gate runs 96 key-generation/deletion cases, 96 certificate/signature cases, 96 attestation cases, and the libykpiv hardware API suite. The only accepted libykpiv mismatch is the expected device-model check for the virtual `Virtual PCD` reader. No physical smart-card device is accessed.
 
+YubiKey management compatibility is tested separately against `ykman` 5.9.2:
+
+```bash
+./tools/test_ykman_management_container.sh
+```
+
+The management gate verifies device/application discovery, partial configuration merge semantics, power-cycle persistence, configuration-lock redaction and enforcement, correct/wrong lock handling, lock clearing, and USB application updates that carry the management reboot TLV. The test uses only the native emulator and virtual PC/SC reader.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
