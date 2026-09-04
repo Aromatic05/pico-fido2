@@ -227,6 +227,38 @@ The QEMU profile runs the ESP32-S3 boot/storage/eFuse platform path while replac
 
 The test requires the Espressif QEMU fork with the `esp32s3` machine, verifies that `app_main()` starts and returns without a reset loop, and asserts that reversible bring-up leaves the blank virtual eFuse unchanged.
 
+### ESP32-S3 security QEMU test
+
+The security-only QEMU profile builds a signed Secure Boot v2 image, moves the partition table to `0x10000` to make room for the signed bootloader, and marks PicoKeys `part0` as encrypted. It then validates the first-boot Secure Boot/Flash Encryption transition entirely in a virtual ESP32-S3:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_security_qemu.sh
+```
+
+The gate verifies RSA-PSS signatures for the bootloader and application, rejects a deliberately tampered signed application, observes virtual KEY0/KEY1 provisioning, confirms `SECURE_BOOT_EN` and Flash Encryption activation, and verifies that the encrypted `part0` is no longer plaintext erased flash. The profile is QEMU-only and must not be flashed to hardware. Espressif currently documents ESP32-S3 QEMU Secure Boot as unsupported, so post-reset ROM Secure Boot verification is deliberately not a pass condition.
+
+The eventual hardware provisioning layout is deterministic and generated off-device:
+
+```text
+KEY0 = SECURE_BOOT_DIGEST0
+KEY1 = XTS_AES_128_KEY
+KEY2 = FREE
+KEY3 = USER / PicoKeys MKEK
+KEY4 = USER / PicoKeys secp256k1 device key
+KEY5 = FREE
+```
+
+`tools/esp32s3_provision.py` currently has no device-write operation. It can show the plan or generate host-only RSA-3072, XTS-AES-128, MKEK, and secp256k1 material plus an integrity manifest:
+
+```bash
+./tools/esp32s3_provision.py plan
+./tools/esp32s3_provision.py generate --output-dir build-provisioning
+./tools/esp32s3_provision.py verify build-provisioning/manifest.json
+```
+
+For experiments the plan uses `SPI_BOOT_CRYPT_CNT=0b001` and leaves JTAG/ROM download available. Production hardening is intentionally a separate irreversible step.
+
 ### Native host emulation
 
 The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
