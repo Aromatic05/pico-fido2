@@ -175,6 +175,17 @@ SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults" idf.py -B bui
 
 This profile is intentionally insecure and is only for bring-up. It does not write Pico FIDO2 root keys to eFuse.
 
+### ESP32-S3 FIDO over BLE bring-up
+
+The BLE profile exposes the standard FIDO GATT service through ESP-NimBLE while reusing the same CTAP2 core as USB HID:
+
+```bash
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble build
+```
+
+The bring-up BLE profile keeps pairing mode continuously available so radio, bonding, framing, and CTAP interoperability can be tested without provisioning eFuse keys. A production build must gate pairing mode behind deliberate user presence.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.

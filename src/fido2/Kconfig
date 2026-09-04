@@ -1,0 +1,11 @@
+menu "Pico FIDO2 transports"
+
+config PICO_FIDO2_BLE
+    bool "FIDO2 over Bluetooth LE"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Expose the standard FIDO GATT service over ESP-NimBLE and route BLE
+        MSG requests through the same CTAP2 core used by USB HID.
+
+endmenu
