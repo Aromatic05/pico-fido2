@@ -279,6 +279,17 @@ The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2
 
 The intended first hardware boot order is therefore: verify the untouched board baseline, provision KEY0/KEY1/KEY3/KEY4, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot.
 
+After the device is provisioned, firmware updates do not consume any additional eFuse key slot. Keep the same Secure Boot signing key and per-device Flash Encryption key, build a signed application, and pre-encrypt it for the fixed factory-app offset (`0x20000`):
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/build_esp32s3_update_bundle.sh build-provisioning build-update-bundle 7.4.1
+./tools/verify_esp32s3_update_bundle.py build-update-bundle build-provisioning
+./tools/test_esp32s3_update_bundle.sh build-provisioning
+```
+
+The update bundle contains an app-only ciphertext image. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables.
+
 ### Native host emulation
 
 The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
