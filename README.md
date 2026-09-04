@@ -180,6 +180,31 @@ The development profile deliberately leaves JTAG and ROM download mode enabled a
 
 ESP-IDF can enable Secure Boot automatically on first boot, but that path revokes unused Secure Boot digest slots. If key rotation or additional signing keys are required, pre-provision the public-key digest and `SECURE_BOOT_EN` with host tooling before first boot instead.
 
+#### Physical signed updates and recovery
+
+Secure Boot does not limit the number of firmware updates. All future bootloader and application images can continue to use the same trusted RSA-3072 signing key. The ESP32-S3 development profile keeps ROM download mode available, and Secure Boot builds use the ROM flasher directly with the flasher stub disabled.
+
+Use the host-side update helper after activating the ESP-IDF environment:
+
+```bash
+# Verify the app and bootloader against the trusted signing key.
+./tools/esp32s3_secure_update.py verify
+
+# Inspect the ROM security state while the device is in download mode.
+./tools/esp32s3_secure_update.py probe --port PORT
+
+# Normal firmware update: rewrite only the signed application.
+./tools/esp32s3_secure_update.py flash --port PORT
+
+# Recovery: rewrite the partition table and signed application, but preserve
+# the already trusted bootloader. The part0 data partition is not touched.
+./tools/esp32s3_secure_update.py recover --port PORT
+```
+
+Overwriting the bootloader is intentionally not part of normal recovery. `esptool` protects the bootloader region once Secure Boot is detected. If a signed bootloader itself must be recovered, use `recover --include-bootloader`; the helper verifies the bootloader signature first and then explicitly enables `esptool --force`.
+
+Enabling Secure Boot disables the USB-OTG ROM stack used for DFU/USB serial emulation on that interface. Do not rely on that ROM USB-OTG path for recovery. A ROM download path that remains enabled by the device security configuration is required.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
