@@ -206,6 +206,18 @@ SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.
 
 Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. Wi-Fi configuration is kept in RAM for this bring-up mode. Production firmware should only enable commissioning after deliberate physical user presence.
 
+### Native host emulation
+
+The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
+
+```bash
+cmake -S . -B build-host -DENABLE_EMULATION=1
+cmake --build build-host -j
+./tests/host_protocol_smoke.py build-host/pico_fido2
+```
+
+The smoke test drives the emulator through both transport paths: CTAPHID `INIT` plus CTAP2 `authenticatorGetInfo` over the HID TCP transport, and OpenPGP `SELECT` plus `GET DATA 006E` over the raw APDU TCP transport.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
