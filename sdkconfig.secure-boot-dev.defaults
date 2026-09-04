@@ -1,0 +1,20 @@
+# ESP32-S3 Secure Boot v2 development profile.
+# Use together with sdkconfig.defaults via SDKCONFIG_DEFAULTS.
+#
+# This profile intentionally preserves JTAG, ROM download mode and the ability
+# to read-protect additional eFuses so development and later flash-encryption
+# provisioning remain possible. Do not use these relaxed settings for a
+# production token.
+
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
+CONFIG_SECURE_BOOT_FLASH_BOOTLOADER_DEFAULT=y
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+
+CONFIG_SECURE_BOOT_INSECURE=y
+CONFIG_SECURE_BOOT_V2_ALLOW_EFUSE_RD_DIS=y
+CONFIG_SECURE_BOOT_ALLOW_JTAG=y
+CONFIG_SECURE_BOOT_ALLOW_UNUSED_DIGEST_SLOTS=y
+CONFIG_SECURE_INSECURE_ALLOW_DL_MODE=y

@@ -21,12 +21,12 @@ Currently most secure features are supported and implemented only for RP2350.
 
 | | RP2350 | RP2040 | ESP32-S2 | ESP32-S3 |
 |---|---|---|---|---|
-| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | No (`// TODO`) |
+| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | ESP-IDF Secure Boot v2 |
 | Secure Lock | Yes (key invalidation, page locking) | No | No | No |
 | MKEK in OTP/eFuse | Yes (OTP rows with ECC, chaff, page locking) | No (plaintext flash) | Yes (eFuse `BLK_KEY3`, write-locked) | Yes (eFuse `BLK_KEY3`, write-locked) |
 | Device key in OTP/eFuse | Yes (OTP + chaff + migration) | No | Yes (eFuse `BLK_KEY4`) | Yes (eFuse `BLK_KEY4`) |
-| `cmd_secure` APDU | Available | Not available | Available | Available |
-| Firmware signing | Yes (`pico_sign_binary`) | No | No | No |
+| `cmd_secure` APDU | Available | Not available | Available | Status/verification only |
+| Firmware signing | Yes (`pico_sign_binary`) | No | No | Yes (ESP-IDF RSA-3072) |
 | Rollback protection | Yes | No | No | No |
 | HW crypto | SHA-256	| No | SHA-256 + AES-GCM + ECDSA/ECDH | SHA-256 + AES-GCM + ECDSA/ECDH |
 
@@ -162,6 +162,23 @@ idf.py all
 cd build
 esptool.py --chip ESP_NAME merge_bin -o pico_fido_esp32.bin @flash_args
 ```
+
+### ESP32-S3 Secure Boot v2
+
+Secure Boot on ESP32-S3 is provided by ESP-IDF. The firmware reports the hardware Secure Boot state through the rescue status command, but does not burn Secure Boot eFuses from the application. Provisioning is intentionally left to ESP-IDF or host-side tooling so the signed bootloader, application and eFuse digest cannot get out of sync.
+
+For development builds, generate a local RSA-3072 signing key and combine the normal defaults with the development Secure Boot profile:
+
+```bash
+idf.py secure-generate-signing-key --version 2 secure_boot_signing_key.pem
+rm -rf build sdkconfig
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure-boot-dev.defaults" idf.py set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure-boot-dev.defaults" idf.py build
+```
+
+The development profile deliberately leaves JTAG and ROM download mode enabled and keeps `RD_DIS` writable, which is useful when Flash Encryption or other read-protected eFuse keys will be provisioned later. These settings are not intended for a production token.
+
+ESP-IDF can enable Secure Boot automatically on first boot, but that path revokes unused Secure Boot digest slots. If key rotation or additional signing keys are required, pre-provision the public-key digest and `SECURE_BOOT_EN` with host tooling before first boot instead.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
