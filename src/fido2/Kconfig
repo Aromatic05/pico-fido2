@@ -8,4 +8,29 @@ config PICO_FIDO2_BLE
         Expose the standard FIDO GATT service over ESP-NimBLE and route BLE
         MSG requests through the same CTAP2 core used by USB HID.
 
+config PICO_FIDO2_WIFI_COMMISSIONING
+    bool "Wi-Fi commissioning SoftAP"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Start a development commissioning SoftAP and read-only Web UI. This is
+        intended for bring-up; production firmware should gate commissioning
+        mode behind deliberate physical user presence.
+
+config PICO_FIDO2_WIFI_SSID_PREFIX
+    string "Commissioning SoftAP SSID prefix"
+    default "PicoFIDO2"
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+
+config PICO_FIDO2_WIFI_PASSWORD
+    string "Commissioning SoftAP password"
+    default "pico-fido2"
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+
+config PICO_FIDO2_WIFI_CHANNEL
+    int "Commissioning SoftAP channel"
+    range 1 13
+    default 6
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+
 endmenu

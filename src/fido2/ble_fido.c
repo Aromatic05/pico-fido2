@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "nvs_flash.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_att.h"
@@ -343,16 +342,10 @@ static void fido_ble_host_task(void *arg) {
     nimble_port_freertos_deinit();
 }
 
-void picokey_extra_transport_init() {
+void fido_ble_init(void) {
     ble_itf = card_register_interface(500);
     fido_ble_rx_reset(&rx);
 
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
     ESP_ERROR_CHECK(nimble_port_init());
 
     ble_hs_cfg.reset_cb = fido_ble_on_reset;
@@ -383,7 +376,7 @@ void picokey_extra_transport_init() {
     nimble_port_freertos_init(fido_ble_host_task);
 }
 
-void picokey_extra_transport_task() {
+void fido_ble_task(void) {
     if (rx.active && board_millis() - rx_fragment_time > FIDO_BLE_FRAGMENT_TIMEOUT_MS) {
         fido_ble_error(FIDO_BLE_ERR_REQ_TIMEOUT);
         fido_ble_rx_reset(&rx);

@@ -180,11 +180,31 @@ This profile is intentionally insecure and is only for bring-up. It does not wri
 The BLE profile exposes the standard FIDO GATT service through ESP-NimBLE while reusing the same CTAP2 core as USB HID:
 
 ```bash
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble set-target esp32s3
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble build
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble -DSDKCONFIG=sdkconfig.ble set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble -DSDKCONFIG=sdkconfig.ble build
 ```
 
 The bring-up BLE profile keeps pairing mode continuously available so radio, bonding, framing, and CTAP interoperability can be tested without provisioning eFuse keys. A production build must gate pairing mode behind deliberate user presence.
+
+### ESP32-S3 Wi-Fi commissioning bring-up
+
+The Wi-Fi profile starts a WPA2 SoftAP named `PicoFIDO2-XXXX` and a read-only commissioning page at `http://192.168.4.1`. The default development password is `pico-fido2`. The page currently exposes only device/build status; it does not modify credentials, OpenPGP data, firmware, or eFuses.
+
+Wi-Fi only:
+
+```bash
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi build
+```
+
+BLE and Wi-Fi together:
+
+```bash
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless build
+```
+
+Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. Wi-Fi configuration is kept in RAM for this bring-up mode. Production firmware should only enable commissioning after deliberate physical user presence.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
