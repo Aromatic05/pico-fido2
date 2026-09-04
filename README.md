@@ -21,13 +21,13 @@ Currently most secure features are supported and implemented only for RP2350.
 
 | | RP2350 | RP2040 | ESP32-S2 | ESP32-S3 |
 |---|---|---|---|---|
-| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | No (`// TODO`) |
+| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | Yes (ESP-IDF Secure Boot v2 / RSA-3072, host-provisioned) |
 | Secure Lock | Yes (key invalidation, page locking) | No | No | No |
 | MKEK in OTP/eFuse | Yes (OTP rows with ECC, chaff, page locking) | No (plaintext flash) | Yes (eFuse `BLK_KEY3`, write-locked) | Yes (eFuse `BLK_KEY3`, write-locked) |
 | Device key in OTP/eFuse | Yes (OTP + chaff + migration) | No | Yes (eFuse `BLK_KEY4`) | Yes (eFuse `BLK_KEY4`) |
-| `cmd_secure` APDU | Available | Not available | Available | Available |
-| Firmware signing | Yes (`pico_sign_binary`) | No | No | No |
-| Rollback protection | Yes | No | No | No |
+| `cmd_secure` APDU | Available | Not available | Not available | Not available |
+| Firmware signing | Yes (`pico_sign_binary`) | No | No | Yes (ESP-IDF Secure Boot v2) |
+| Rollback protection | Yes | No | No | Yes (single-slot, host-managed `SECURE_VERSION` floor) |
 | HW crypto | SHA-256	| No | SHA-256 + AES-GCM + ECDSA/ECDH | SHA-256 + AES-GCM + ECDSA/ECDH |
 
 ## Features
@@ -68,7 +68,7 @@ Pico FIDO2 includes the following features:
 - Button press generates an OTP that is directly typed
 - Yubico YKMAN compatible
 - Nitrokey nitropy and nitroapp compatible
-- Secure Boot and Secure Lock in RP2350 and ESP32-S3 MCUs
+- Secure Boot on RP2350 and ESP32-S3; Secure Lock on RP2350
 - One Time Programming to store the master key that encrypts all resident keys and seeds.
 - Rescue interface to allow recovery of the device if it becomes unresponsive or undetectable.
 - LED customization with Pico Commissioner.
@@ -238,6 +238,17 @@ The security-only QEMU profile builds a signed Secure Boot v2 image, moves the p
 
 The gate verifies RSA-PSS signatures for the bootloader and application, rejects a deliberately tampered signed application, observes virtual KEY0/KEY1 provisioning, confirms `SECURE_BOOT_EN` and Flash Encryption activation, and verifies that the encrypted `part0` is no longer plaintext erased flash. The profile is QEMU-only and must not be flashed to hardware. Espressif currently documents ESP32-S3 QEMU Secure Boot as unsupported, so post-reset ROM Secure Boot verification is deliberately not a pass condition.
 
+### ESP32-S3 single-slot anti-rollback test
+
+ESP-IDF's stock anti-rollback policy requires OTA slots and disallows a factory partition. Pico FIDO2 keeps its single `factory` application and instead uses a small bootloader wrapper that compares the application's `esp_app_desc.secure_version` with the ESP32-S3 16-bit `SECURE_VERSION` eFuse floor. The firmware never advances that floor automatically; host provisioning owns irreversible revocation.
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_anti_rollback_qemu.sh
+```
+
+The QEMU gate sets a disposable virtual floor of `2` and requires `v1` to be rejected while `v2` and `v3` boot. Each run also verifies that the virtual eFuse backing file is unchanged. Normal firmware updates therefore do not consume eFuse bits; advance the floor only when an older signed firmware must be permanently revoked. Hardware anti-rollback builds require Secure Boot.
+
 The eventual hardware provisioning layout is deterministic and generated off-device:
 
 ```text
@@ -271,7 +282,7 @@ A fully host-prepared 4 MiB security image can then be built without any connect
 ```bash
 . "$IDF_PATH/export.sh"
 ./tools/esp32s3_provision.py generate --output-dir build-provisioning
-./tools/build_esp32s3_security_bundle.sh build-provisioning build-security-bundle
+./tools/build_esp32s3_security_bundle.sh build-provisioning build-security-bundle 0
 ./tools/verify_esp32s3_security_bundle.py build-security-bundle build-provisioning
 ```
 
@@ -279,17 +290,17 @@ The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2
 
 The intended first hardware boot order is therefore: verify the untouched board baseline, provision KEY0/KEY1/KEY3/KEY4, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot.
 
-After the device is provisioned, firmware updates do not consume any additional eFuse key slot. Keep the same Secure Boot signing key and per-device Flash Encryption key, build a signed application, and pre-encrypt it for the fixed factory-app offset (`0x20000`):
+After the device is provisioned, firmware updates do not consume any additional eFuse key slot or `SECURE_VERSION` bit. Keep the same Secure Boot signing key and per-device Flash Encryption key, choose an application security epoch, build a signed application, and pre-encrypt it for the fixed factory-app offset (`0x20000`):
 
 ```bash
 . "$IDF_PATH/export.sh"
-./tools/build_esp32s3_update_bundle.sh build-provisioning build-update-bundle 7.4.1
-./tools/verify_esp32s3_update_bundle.py build-update-bundle build-provisioning
+./tools/build_esp32s3_update_bundle.sh build-provisioning build-update-bundle 7.4.1 3
+./tools/verify_esp32s3_update_bundle.py build-update-bundle build-provisioning --security-floor 2
 ./tools/test_esp32s3_update_bundle.sh build-provisioning
 ./tools/test_esp32s3_rom_update_qemu.sh
 ```
 
-The update bundle contains an app-only ciphertext image. It must be written as raw ciphertext at `0x20000`; do **not** pass esptool's `--encrypt` flag to an already pre-encrypted update. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gate additionally performs an encrypted app write after Secure Boot and Flash Encryption have been enabled, verifies that the eFuse image is byte-for-byte unchanged, and asserts that the bootloader, partition-table region, and `part0` credential-storage region are untouched.
+The update bundle binds its manifest `security_version` to the encrypted application's `esp_app_desc.secure_version`; the verifier can reject a bundle below a supplied device floor before flashing. It contains an app-only ciphertext image and must be written as raw ciphertext at `0x20000`; do **not** pass esptool's `--encrypt` flag to an already pre-encrypted update. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gate additionally performs an encrypted app write after Secure Boot and Flash Encryption have been enabled, verifies that the eFuse image is byte-for-byte unchanged, and asserts that the bootloader, partition-table region, and `part0` credential-storage region are untouched.
 
 ### Native host emulation
 

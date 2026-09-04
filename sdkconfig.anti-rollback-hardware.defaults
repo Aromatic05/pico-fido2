@@ -1,0 +1,5 @@
+# Hardware single-slot anti-rollback policy. Secure Boot is supplied by the
+# security build profile; the epoch is overridden per release when necessary.
+CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y
+CONFIG_PICO_FIDO2_SECURITY_VERSION=0
+# CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP is not set

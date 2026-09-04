@@ -5,6 +5,8 @@ provision_dir="${1:-build-provisioning}"
 run_dir="${TMPDIR:-/tmp}/pico-fido2-update-test-$$"
 out_dir="$run_dir/update"
 version="7.4.1"
+security_version=3
+security_floor=2
 
 fail() {
     echo "update-test: $*" >&2
@@ -16,8 +18,8 @@ mkdir -p "$run_dir"
 [[ -n "${IDF_PATH:-}" ]] || fail 'IDF_PATH is not set; activate ESP-IDF 5.5 first'
 [[ -f "$provision_dir/manifest.json" ]] || fail "missing $provision_dir/manifest.json"
 
-./tools/build_esp32s3_update_bundle.sh "$provision_dir" "$out_dir" "$version" >/dev/null
-./tools/verify_esp32s3_update_bundle.py "$out_dir" "$provision_dir" >/dev/null
+./tools/build_esp32s3_update_bundle.sh "$provision_dir" "$out_dir" "$version" "$security_version" >/dev/null
+./tools/verify_esp32s3_update_bundle.py "$out_dir" "$provision_dir" --security-floor "$security_floor" >/dev/null
 
 manifest="$out_dir/manifest.json"
 encrypted="$out_dir/$(python3 - "$manifest" <<'PY'
@@ -32,6 +34,32 @@ PY
 )"
 xts_key="$provision_dir/flash_encryption_key.bin"
 signing_key="$provision_dir/secure_boot_signing_key.pem"
+
+manifest_security_version="$(python3 - "$manifest" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['security_version'])
+PY
+)"
+[[ "$manifest_security_version" == "$security_version" ]] || fail 'manifest security_version mismatch'
+
+# Host preflight must reject a correctly signed/encrypted image below the requested floor.
+if ./tools/verify_esp32s3_update_bundle.py "$out_dir" "$provision_dir" \
+    --security-floor "$((security_version + 1))" >/dev/null 2>&1; then
+    fail 'update below requested security floor was accepted'
+fi
+
+# The manifest cannot lie about the embedded esp_app_desc security version.
+cp -a "$out_dir" "$run_dir/wrong-version-manifest"
+python3 - "$run_dir/wrong-version-manifest/manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p))
+data['security_version'] -= 1
+open(p, 'w').write(json.dumps(data, indent=2, sort_keys=True) + '\n')
+PY
+if ./tools/verify_esp32s3_update_bundle.py "$run_dir/wrong-version-manifest" "$provision_dir" >/dev/null 2>&1; then
+    fail 'manifest/image security_version mismatch was accepted'
+fi
 
 # Wrong XTS key must not recover the signed plaintext.
 python3 - "$run_dir/wrong-xts.bin" <<'PY'
@@ -76,6 +104,9 @@ python -m espsecure verify_signature --version 2 --keyfile "$signing_key" "$run_
 
 printf 'ESP32-S3 update bundle gate: PASS\n'
 printf 'same KEY0 signing trust: PASS\n'
+printf 'security version %s >= floor %s: PASS\n' "$security_version" "$security_floor"
+printf 'security floor negative test: PASS\n'
+printf 'manifest/image security version binding: PASS\n'
 printf 'same KEY1 XTS encryption: PASS\n'
 printf 'wrong key negative test: PASS\n'
 printf 'wrong offset negative test: PASS\n'

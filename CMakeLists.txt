@@ -140,6 +140,18 @@ endif()
 SET_VERSION(ver_major ver_minor "${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/version.h" 1)
 if(ESP_PLATFORM)
     project(pico_fido2)
+    if(CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK)
+        if(NOT CONFIG_SECURE_BOOT AND NOT CONFIG_PICO_FIDO2_QEMU)
+            message(FATAL_ERROR "Single-slot anti-rollback requires Secure Boot outside QEMU")
+        endif()
+        if(CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP)
+            message(FATAL_ERROR "Single-slot anti-rollback forbids BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP")
+        endif()
+        idf_component_get_property(esp_app_format_lib esp_app_format COMPONENT_LIB)
+        target_compile_definitions(${esp_app_format_lib} PRIVATE
+            CONFIG_BOOTLOADER_APP_SECURE_VERSION=${CONFIG_PICO_FIDO2_SECURITY_VERSION}
+        )
+    endif()
 endif()
 set(INCLUDES ${INCLUDES}
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido

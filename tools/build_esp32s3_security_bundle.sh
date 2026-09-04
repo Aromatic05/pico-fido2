@@ -3,9 +3,10 @@ set -euo pipefail
 
 provision_dir="${1:-build-provisioning}"
 out_dir="${2:-build-security-bundle}"
+security_version="${3:-0}"
 build_dir=build-security-preprovisioned
 sdkconfig=sdkconfig.security-preprovisioned
-defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults'
+defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
 
 fail() {
     echo "security-bundle: $*" >&2
@@ -18,15 +19,20 @@ command -v openssl >/dev/null || fail 'openssl not found'
 [[ "$provision_dir" == "build-provisioning" ]] \
     || fail 'current security profile expects provisioning material in build-provisioning'
 [[ -f "$provision_dir/manifest.json" ]] || fail "missing $provision_dir/manifest.json"
+[[ "$security_version" =~ ^[0-9]+$ ]] && (( security_version >= 0 && security_version <= 16 )) \
+    || fail 'security version must be an integer from 0 to 16'
 
 ./tools/esp32s3_provision.py verify "$provision_dir/manifest.json" >/dev/null
 
 rm -rf "$build_dir" "$out_dir"
 rm -f "$sdkconfig" "$sdkconfig.old"
 mkdir -p "$out_dir/encrypted" "$out_dir/decrypted-check"
+version_defaults="$out_dir/.security-version.defaults"
+printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$security_version" >"$version_defaults"
+build_defaults="${defaults};${version_defaults}"
 
-SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" set-target esp32s3 >/dev/null
-SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" build >/dev/null
+SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" set-target esp32s3 >/dev/null
+SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" build >/dev/null
 
 for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
@@ -39,7 +45,9 @@ for expected in \
     CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y \
     CONFIG_SECURE_FLASH_REQUIRE_ALREADY_ENABLED=y \
     CONFIG_SECURE_BOOT_ALLOW_JTAG=y \
-    CONFIG_PARTITION_TABLE_OFFSET=0x10000; do
+    CONFIG_PARTITION_TABLE_OFFSET=0x10000 \
+    CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y \
+    CONFIG_PICO_FIDO2_SECURITY_VERSION=${security_version}; do
     grep -qx "$expected" "$sdkconfig" || fail "missing config: $expected"
 done
 if grep -qx 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' "$sdkconfig"; then
@@ -58,6 +66,11 @@ xts_key="$provision_dir/flash_encryption_key.bin"
 bootloader="$build_dir/bootloader/bootloader.bin"
 partition="$build_dir/partition_table/partition-table.bin"
 app="$build_dir/pico_fido2.bin"
+
+if ! xtensa-esp32s3-elf-nm "$build_dir/bootloader/bootloader.elf" \
+    | grep -q '__wrap_bootloader_utility_load_boot_image'; then
+    fail 'anti-rollback wrapper is missing from initial bootloader'
+fi
 
 python -m espsecure verify_signature --version 2 --keyfile "$signing_key" "$bootloader" >/dev/null
 python -m espsecure verify_signature --version 2 --keyfile "$signing_key" "$app" >/dev/null
@@ -137,7 +150,7 @@ python3 - "$out_dir/manifest.json" "$provision_dir/manifest.json" \
     "$out_dir/esp32s3-security-bundle.bin" \
     "$bootloader" "$partition" "$app" "$out_dir/part0-plain.bin" \
     "$out_dir/encrypted/bootloader.bin" "$out_dir/encrypted/partition.bin" \
-    "$out_dir/encrypted/app.bin" "$out_dir/encrypted/part0.bin" <<'PY'
+    "$out_dir/encrypted/app.bin" "$out_dir/encrypted/part0.bin" "$security_version" <<'PY'
 from pathlib import Path
 import hashlib, json, sys
 
@@ -146,6 +159,7 @@ provision_manifest = Path(sys.argv[2])
 bundle = Path(sys.argv[3])
 plain = [Path(p) for p in sys.argv[4:8]]
 encrypted = [Path(p) for p in sys.argv[8:12]]
+security_version = int(sys.argv[12])
 names = ['bootloader', 'partition', 'app', 'part0']
 offsets = [0x000000, 0x010000, 0x020000, 0x200000]
 
@@ -177,8 +191,11 @@ out = {
     },
     'provisioning_manifest_sha256': sha(provision_manifest),
     'secure_boot_digest_hex': pmanifest['secure_boot_digest_hex'],
+    'security_version': security_version,
     'security_policy': {
         'secure_boot': 'v2/RSA-3072/host-key',
+        'anti_rollback': 'single-factory bootloader policy; eFuse floor advanced only by host provisioning',
+        'secure_version_floor_expected_before_boot': 0,
         'flash_encryption': 'XTS-AES-128/host-key',
         'spi_boot_crypt_cnt_expected_before_boot': '0b001',
         'required_root_keys': ['KEY3:USER:MKEK', 'KEY4:USER:secp256k1-device-key'],
@@ -192,7 +209,7 @@ manifest_path.write_text(json.dumps(out, indent=2, sort_keys=True) + '\n')
 PY
 
 rm -rf "$out_dir/decrypted-check"
-rm -f "$out_dir/part0-plain.bin"
+rm -f "$out_dir/part0-plain.bin" "$version_defaults"
 
 [[ "$(stat -c %s "$out_dir/esp32s3-security-bundle.bin")" -eq 4194304 ]] \
     || fail 'bundle size is not 4 MiB'
@@ -203,5 +220,6 @@ printf 'Security bundle: PASS\n'
 printf 'Bundle: %s\n' "$(sha256sum "$out_dir/esp32s3-security-bundle.bin" | awk '{print $1}')"
 printf 'Signed bootloader: %s bytes\n' "$(stat -c %s "$bootloader")"
 printf 'Signed app: %s bytes\n' "$(stat -c %s "$app")"
+printf 'Security version: %s\n' "$security_version"
 printf 'Manifest: %s\n' "$out_dir/manifest.json"
 printf 'No device write was performed.\n'

@@ -6,10 +6,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+APP_DESC_OFFSET = 24 + 8
+APP_DESC_MAGIC = 0xABCD5432
+MAX_SECURITY_VERSION = 16
 
 EXPECTED_OFFSETS = {
     "bootloader": 0x000000,
@@ -69,6 +74,14 @@ def verify(bundle_dir: Path, provision_dir: Path) -> None:
         die("provisioning manifest hash mismatch")
     if manifest.get("secure_boot_digest_hex") != provision_manifest.get("secure_boot_digest_hex"):
         die("Secure Boot digest manifest mismatch")
+    security_version = manifest.get("security_version")
+    if not isinstance(security_version, int) or not 0 <= security_version <= MAX_SECURITY_VERSION:
+        die("invalid security_version")
+    policy = manifest.get("security_policy", {})
+    if policy.get("anti_rollback") != "single-factory bootloader policy; eFuse floor advanced only by host provisioning":
+        die("unexpected anti-rollback policy")
+    if policy.get("secure_version_floor_expected_before_boot") != 0:
+        die("initial security bundle must expect an unadvanced SECURE_VERSION floor")
 
     bundle = bundle_dir / manifest["bundle"]["file"]
     if not bundle.is_file() or bundle.stat().st_size != 0x400000:
@@ -129,6 +142,15 @@ def verify(bundle_dir: Path, provision_dir: Path) -> None:
                 die(f"decrypted plaintext SHA-256 mismatch: {name}")
             decrypted_paths[name] = plain_path
 
+        app_bytes = decrypted_paths["app"].read_bytes()
+        if len(app_bytes) < APP_DESC_OFFSET + 8:
+            die("application is too small for esp_app_desc")
+        app_magic, image_security_version = struct.unpack_from("<II", app_bytes, APP_DESC_OFFSET)
+        if app_magic != APP_DESC_MAGIC:
+            die("application descriptor magic mismatch")
+        if image_security_version != security_version:
+            die(f"manifest/image security_version mismatch: {security_version} != {image_security_version}")
+
         for name in ("bootloader", "app"):
             run(
                 [
@@ -151,6 +173,7 @@ def verify(bundle_dir: Path, provision_dir: Path) -> None:
     print(f"bundle: PASS ({bundle})")
     print(f"sha256: {manifest['bundle']['sha256']}")
     print(f"secure boot digest: {manifest['secure_boot_digest_hex']}")
+    print(f"security version: {security_version} (initial eFuse floor 0)")
     print("XTS decrypt/plaintext hashes: PASS")
     print("RSA-PSS bootloader/app signatures: PASS")
 

@@ -4,9 +4,10 @@ set -euo pipefail
 provision_dir="${1:-build-provisioning}"
 out_dir="${2:-build-update-bundle}"
 project_ver="${3:-7.4.1}"
+security_version="${4:-0}"
 build_dir=build-security-update
 sdkconfig=sdkconfig.security-update
-defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults'
+defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
 app_offset=0x20000
 
 fail() {
@@ -20,16 +21,21 @@ command -v idf.py >/dev/null || fail 'idf.py not found'
     || fail 'current secure build profile expects provisioning material in build-provisioning'
 [[ -f "$provision_dir/manifest.json" ]] || fail "missing $provision_dir/manifest.json"
 [[ -n "$project_ver" && ${#project_ver} -le 31 ]] || fail 'project version must be 1..31 characters'
+[[ "$security_version" =~ ^[0-9]+$ ]] && (( security_version >= 0 && security_version <= 16 )) \
+    || fail 'security version must be an integer from 0 to 16'
 
 ./tools/esp32s3_provision.py verify "$provision_dir/manifest.json" >/dev/null
 
 rm -rf "$build_dir" "$out_dir"
 rm -f "$sdkconfig" "$sdkconfig.old"
 mkdir -p "$out_dir"
+version_defaults="$out_dir/.security-version.defaults"
+printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$security_version" >"$version_defaults"
+build_defaults="${defaults};${version_defaults}"
 
-SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
+SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
     -DPROJECT_VER="$project_ver" set-target esp32s3 >/dev/null
-SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
+SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
     -DPROJECT_VER="$project_ver" build >/dev/null
 
 for expected in \
@@ -40,7 +46,9 @@ for expected in \
     CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y \
     CONFIG_SECURE_FLASH_ENC_ENABLED=y \
     CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y \
-    CONFIG_SECURE_FLASH_REQUIRE_ALREADY_ENABLED=y; do
+    CONFIG_SECURE_FLASH_REQUIRE_ALREADY_ENABLED=y \
+    CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y \
+    CONFIG_PICO_FIDO2_SECURITY_VERSION=${security_version}; do
     grep -qx "$expected" "$sdkconfig" || fail "missing config: $expected"
 done
 if grep -qx 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' "$sdkconfig"; then
@@ -65,9 +73,9 @@ python -m espsecure encrypt_flash_data --aes_xts \
 python -m espsecure decrypt_flash_data --aes_xts \
     --keyfile "$xts_key" --address "$app_offset" --output "$check_plain" "$encrypted" >/dev/null
 cmp "$app" "$check_plain" >/dev/null || fail 'XTS update round-trip mismatch'
-rm -f "$check_plain"
+rm -f "$check_plain" "$version_defaults"
 
-python3 - "$out_dir/manifest.json" "$provision_dir/manifest.json" "$encrypted" "$app" "$project_ver" <<'PY'
+python3 - "$out_dir/manifest.json" "$provision_dir/manifest.json" "$encrypted" "$app" "$project_ver" "$security_version" <<'PY'
 from pathlib import Path
 import hashlib
 import json
@@ -78,6 +86,7 @@ provision_manifest_path = Path(sys.argv[2])
 encrypted_path = Path(sys.argv[3])
 app_path = Path(sys.argv[4])
 project_ver = sys.argv[5]
+security_version = int(sys.argv[6])
 
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 provision = json.loads(provision_manifest_path.read_text())
@@ -86,6 +95,7 @@ manifest = {
     'kind': 'esp32s3-app-update',
     'chip': 'esp32s3',
     'project_version': project_ver,
+    'security_version': security_version,
     'app_offset': '0x020000',
     'provisioning_manifest_sha256': sha(provision_manifest_path),
     'secure_boot_digest_hex': provision['secure_boot_digest_hex'],
@@ -102,6 +112,7 @@ manifest = {
         'secure_boot': 'must match existing KEY0 digest',
         'flash_encryption': 'must use existing KEY1 XTS-AES-128 key',
         'efuse_changes': 'none',
+        'anti_rollback': 'image security_version must be at or above the device SECURE_VERSION floor',
         'write_offset': '0x020000',
         'artifact_format': 'pre-encrypted-ciphertext',
         'esptool_write_mode': 'raw-no-encrypt',
@@ -117,6 +128,7 @@ PY
 
 printf 'Update bundle: PASS\n'
 printf 'Version: %s\n' "$project_ver"
+printf 'Security version: %s\n' "$security_version"
 printf 'Offset: %s\n' "$app_offset"
 printf 'Signed plaintext: %s bytes\n' "$(stat -c %s "$app")"
 printf 'Encrypted update: %s\n' "$(sha256sum "$encrypted" | awk '{print $1}')"
