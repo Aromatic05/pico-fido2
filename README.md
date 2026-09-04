@@ -249,6 +249,21 @@ ESP-IDF's stock anti-rollback policy requires OTA slots and disallows a factory 
 
 The QEMU gate sets a disposable virtual floor of `2` and requires `v1` to be rejected while `v2` and `v3` boot. Each run also verifies that the virtual eFuse backing file is unchanged. Normal firmware updates therefore do not consume eFuse bits; advance the floor only when an older signed firmware must be permanently revoked. Hardware anti-rollback builds require Secure Boot.
 
+The floor is advanced by the host provisioning tool, not by normal firmware. Without `--apply`, the command is dry-run/read-only. For example, to plan floor `2 -> 3`, inspect a connected device, and then explicitly apply the change:
+
+```bash
+./tools/esp32s3_provision.py security-version --current 2 --target 3
+./tools/esp32s3_provision.py security-version --port /dev/ttyACM0 --target 3
+./tools/esp32s3_provision.py security-version --port /dev/ttyACM0 --target 3 --expect-current 2 --expect-mac 12:34:56:78:9a:bc --apply
+```
+
+`SECURE_VERSION` is a unary bit field: floor `3` is raw `0x0007`, not integer value `3`. The tool validates this canonical form, refuses a lower target, and prints the factory MAC during device dry-run. A real apply requires both `--expect-current` and `--expect-mac`. The complete apply path is tested with `espefuse --virt` and does not require hardware:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_security_floor.sh
+```
+
 The eventual hardware provisioning layout is deterministic and generated off-device:
 
 ```text
@@ -260,7 +275,7 @@ KEY4 = USER / PicoKeys secp256k1 device key
 KEY5 = FREE
 ```
 
-`tools/esp32s3_provision.py` currently has no device-write operation. It can show the plan or generate host-only RSA-3072, XTS-AES-128, MKEK, and secp256k1 material plus an integrity manifest:
+`tools/esp32s3_provision.py` keeps key provisioning host-only. It can show the plan or generate host-only RSA-3072, XTS-AES-128, MKEK, and secp256k1 material plus an integrity manifest; the separate `security-version --apply` path can only advance the `SECURE_VERSION` floor:
 
 ```bash
 ./tools/esp32s3_provision.py plan
