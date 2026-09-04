@@ -86,6 +86,27 @@ static void test_tx_round_trip(void) {
     assert(memcmp(rx.data, data, sizeof(data)) == 0);
 }
 
+static void test_max_message_round_trip(void) {
+    static uint8_t data[FIDO_BLE_MAX_MESSAGE];
+    for (size_t i = 0; i < sizeof(data); ++i) data[i] = (uint8_t)(i * 17u);
+
+    fido_ble_tx_t tx;
+    fido_ble_tx_init(&tx, FIDO_BLE_CMD_MSG, data, sizeof(data));
+    fido_ble_rx_t rx;
+    fido_ble_rx_reset(&rx);
+    uint8_t fragment[20];
+    int result = 0;
+    while (!fido_ble_tx_done(&tx)) {
+        size_t len = fido_ble_tx_next(&tx, fragment, sizeof(fragment));
+        assert(len > 0);
+        result = fido_ble_rx_feed(&rx, fragment, len);
+        assert(result >= 0);
+    }
+    assert(result == 1);
+    assert(rx.received_len == sizeof(data));
+    assert(memcmp(rx.data, data, sizeof(data)) == 0);
+}
+
 int main(void) {
     test_single_fragment();
     test_fragmented_message();
@@ -94,5 +115,6 @@ int main(void) {
     test_invalid_length();
     test_zero_length_tx();
     test_tx_round_trip();
+    test_max_message_round_trip();
     return 0;
 }
