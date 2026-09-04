@@ -188,7 +188,7 @@ The bring-up BLE profile keeps pairing mode continuously available so radio, bon
 
 ### ESP32-S3 Wi-Fi commissioning bring-up
 
-The Wi-Fi profile starts a WPA2 SoftAP named `PicoFIDO2-XXXX` and a read-only commissioning page at `http://192.168.4.1`. The default development password is `pico-fido2`. The page currently exposes only device/build status; it does not modify credentials, OpenPGP data, firmware, or eFuses.
+The Wi-Fi profile keeps the radio off during normal boot. Press the BOOT button five times after startup to enter commissioning mode; this preserves the existing one-through-four press OTP slot behavior. Commissioning starts a WPA2 SoftAP named `PicoFIDO2-XXXX` and a read-only page at `http://192.168.4.1`. The default development password is `pico-fido2`. The page currently exposes only device/build status; it does not modify credentials, OpenPGP data, firmware, or eFuses.
 
 Wi-Fi only:
 

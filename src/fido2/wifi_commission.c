@@ -13,10 +13,13 @@
 #include "esp_wifi.h"
 
 #include "fido/version.h"
+#include "pico_keys.h"
 
 static const char *TAG = "fido_wifi";
 static httpd_handle_t http_server;
 static char softap_ssid[33];
+static bool commissioning_started;
+static int (*previous_button_pressed_cb)(uint8_t);
 
 static const char index_html[] =
     "<!doctype html><html><head><meta charset=utf-8>"
@@ -91,7 +94,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-void fido_wifi_init(void) {
+static void fido_wifi_start(void) {
+    if (commissioning_started) {
+        return;
+    }
+    commissioning_started = true;
+
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP));
     snprintf(softap_ssid, sizeof(softap_ssid), "%s-%02X%02X",
@@ -123,6 +131,24 @@ void fido_wifi_init(void) {
     start_http_server();
 
     ESP_LOGI(TAG, "commissioning AP %s at http://192.168.4.1", softap_ssid);
+}
+
+static int fido_wifi_button_pressed(uint8_t presses) {
+    if (presses == CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES) {
+        fido_wifi_start();
+        return 0;
+    }
+    if (previous_button_pressed_cb) {
+        return previous_button_pressed_cb(presses);
+    }
+    return 0;
+}
+
+void fido_wifi_init(void) {
+    previous_button_pressed_cb = button_pressed_cb;
+    button_pressed_cb = fido_wifi_button_pressed;
+    ESP_LOGI(TAG, "Wi-Fi off; press BOOT %d times to enter commissioning",
+             CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES);
 }
 
 void fido_wifi_task(void) {
