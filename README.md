@@ -259,6 +259,26 @@ KEY5 = FREE
 
 For experiments the plan uses `SPI_BOOT_CRYPT_CNT=0b001` and leaves JTAG/ROM download available. Production hardening is intentionally a separate irreversible step.
 
+The pre-provisioned firmware contract is fail-closed: with `CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y`, blank or incorrectly purposed KEY3/KEY4 cause startup to return `PICOKEY_ERR_PROVISIONING_REQUIRED` without changing eFuses. The QEMU gate verifies blank/fail-closed, virtual provisioning, and provisioned/read-only startup states:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_preprovisioned_qemu.sh
+```
+
+A fully host-prepared 4 MiB security image can then be built without any connected device:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/esp32s3_provision.py generate --output-dir build-provisioning
+./tools/build_esp32s3_security_bundle.sh build-provisioning build-security-bundle
+./tools/verify_esp32s3_security_bundle.py build-security-bundle build-provisioning
+```
+
+The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2, requires pre-provisioned KEY3/KEY4, sets Flash Encryption to `REQUIRE_ALREADY_ENABLED`, XTS-encrypts the bootloader, partition table, application and initially erased `part0`, and decrypts every region again for byte-for-byte verification. The standalone verifier independently checks bundle/provisioning manifest hashes, decrypts all regions, verifies plaintext hashes, verifies the bootloader/application RSA-PSS signatures, and checks that initial `part0` decrypts to erased flash. Neither tool contains a device flash or eFuse write action.
+
+The intended first hardware boot order is therefore: verify the untouched board baseline, provision KEY0/KEY1/KEY3/KEY4, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot.
+
 ### Native host emulation
 
 The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
