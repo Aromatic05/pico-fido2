@@ -33,4 +33,14 @@ config PICO_FIDO2_WIFI_CHANNEL
     default 6
     depends on PICO_FIDO2_WIFI_COMMISSIONING
 
+config PICO_FIDO2_WIFI_COMMISSION_PRESSES
+    int "BOOT presses to enter commissioning"
+    range 5 255
+    default 5
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+    help
+        Pico FIDO2 currently maps one through four BOOT presses to OTP slots.
+        Commissioning therefore uses five or more presses to avoid changing
+        existing OTP button behavior.
+
 endmenu
