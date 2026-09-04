@@ -6,7 +6,15 @@ sdkconfig="${SDKCONFIG:-sdkconfig.qemu}"
 defaults='sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.qemu.defaults'
 run_dir="${TMPDIR:-/tmp}/pico-fido2-qemu-$$"
 mkdir -p "$run_dir"
-trap 'rm -rf "$run_dir"' EXIT
+qemu_pid=""
+cleanup() {
+    if [[ -n "$qemu_pid" ]] && kill -0 "$qemu_pid" 2>/dev/null; then
+        kill "$qemu_pid" 2>/dev/null || true
+        wait "$qemu_pid" 2>/dev/null || true
+    fi
+    rm -rf "$run_dir"
+}
+trap cleanup EXIT
 
 if [[ -z "${IDF_PATH:-}" ]] || ! command -v idf.py >/dev/null 2>&1; then
     echo 'ESP-IDF environment is not active' >&2
@@ -16,12 +24,12 @@ fi
 find_esp_qemu() {
     local candidate
     candidate="$(command -v qemu-system-xtensa || true)"
-    if [[ -n "$candidate" ]] && "$candidate" -machine help 2>/dev/null | grep -q '^esp32s3 '; then
+    if [[ -n "$candidate" ]] && "$candidate" -machine help 2>/dev/null | grep '^esp32s3 ' >/dev/null; then
         printf '%s\n' "$candidate"
         return
     fi
     while IFS= read -r candidate; do
-        if "$candidate" -machine help 2>/dev/null | grep -q '^esp32s3 '; then
+        if "$candidate" -machine help 2>/dev/null | grep '^esp32s3 ' >/dev/null; then
             printf '%s\n' "$candidate"
             return
         fi
@@ -33,6 +41,11 @@ qemu="$(find_esp_qemu)" || {
     echo 'Espressif QEMU with esp32s3 machine support was not found' >&2
     exit 2
 }
+
+# The QEMU gate owns these disposable artifacts. Reusing a generated sdkconfig
+# or build tree can leak stale Kconfig state from another ESP32-S3 profile.
+rm -rf "$build_dir"
+rm -f "$sdkconfig" "$sdkconfig.old"
 
 SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" set-target esp32s3 >/dev/null
 SDKCONFIG_DEFAULTS="$defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" build >/dev/null
@@ -64,20 +77,38 @@ python -m esptool --chip esp32s3 merge_bin \
 
 dd if=/dev/zero of="$run_dir/efuse.bin" bs=1024 count=1 status=none
 before="$(sha256sum "$run_dir/efuse.bin" | awk '{print $1}')"
-set +e
-timeout 5s "$qemu" -M esp32s3 \
+"$qemu" -M esp32s3 \
     -drive file="$build_dir/qemu_flash.bin",if=mtd,format=raw \
     -drive file="$run_dir/efuse.bin",if=none,format=raw,id=efuse \
     -global driver=nvram.esp32c3.efuse,property=drive,value=efuse \
     -nic user,model=open_eth -nographic -serial mon:stdio \
-    >"$run_dir/qemu.log" 2>&1
-rc=$?
-set -e
-if [[ "$rc" -ne 124 ]]; then
-    cat "$run_dir/qemu.log" >&2
-    echo "QEMU exited unexpectedly: $rc" >&2
+    >"$run_dir/qemu.log" 2>&1 &
+qemu_pid=$!
+
+booted=false
+for _ in $(seq 1 400); do
+    if grep -aq 'main_task: Returned from app_main()' "$run_dir/qemu.log"; then
+        booted=true
+        break
+    fi
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+        wait "$qemu_pid" || rc=$?
+        cat "$run_dir/qemu.log" >&2
+        echo "QEMU exited before app_main completed: ${rc:-0}" >&2
+        exit 4
+    fi
+    sleep 0.05
+done
+
+if [[ "$booted" != true ]]; then
+    tail -120 "$run_dir/qemu.log" >&2
+    echo 'QEMU did not complete app_main' >&2
     exit 4
 fi
+
+kill "$qemu_pid"
+wait "$qemu_pid" 2>/dev/null || true
+qemu_pid=""
 
 after="$(sha256sum "$run_dir/efuse.bin" | awk '{print $1}')"
 [[ "$before" == "$after" ]] || {
@@ -85,9 +116,19 @@ after="$(sha256sum "$run_dir/efuse.bin" | awk '{print $1}')"
     exit 4
 }
 
-grep -aq 'Project name:     pico_fido2' "$run_dir/qemu.log"
-grep -aq 'main_task: Calling app_main()' "$run_dir/qemu.log"
-grep -aq 'main_task: Returned from app_main()' "$run_dir/qemu.log"
+require_log() {
+    local pattern="$1"
+    local description="$2"
+    if ! grep -aq "$pattern" "$run_dir/qemu.log"; then
+        tail -120 "$run_dir/qemu.log" >&2
+        echo "QEMU boot milestone missing: $description" >&2
+        exit 4
+    fi
+}
+
+require_log 'Project name:     pico_fido2' 'application image'
+require_log 'main_task: Calling app_main()' 'app_main entry'
+require_log 'main_task: Returned from app_main()' 'app_main return'
 if grep -aqE 'assert failed|Guru Meditation|Rebooting' "$run_dir/qemu.log"; then
     tail -120 "$run_dir/qemu.log" >&2
     echo 'QEMU application crashed or rebooted' >&2
