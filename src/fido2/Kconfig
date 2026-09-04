@@ -1,5 +1,13 @@
 menu "Pico FIDO2 transports"
 
+config PICO_FIDO2_QEMU
+    bool "ESP32-S3 QEMU platform mode"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Disable hardware USB driver/polling when running under Espressif QEMU.
+        Protocol transports are exercised by native host emulation instead.
+
 config PICO_FIDO2_BLE
     bool "FIDO2 over Bluetooth LE"
     default n

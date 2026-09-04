@@ -216,6 +216,17 @@ The helper refuses to flash unless development root keys are enabled and both Se
 
 Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. Wi-Fi configuration is kept in RAM for this bring-up mode. Production firmware should only enable commissioning after deliberate physical user presence.
 
+### ESP32-S3 QEMU platform test
+
+The QEMU profile runs the ESP32-S3 boot/storage/eFuse platform path while replacing peripherals that Espressif QEMU does not emulate (USB and NeoPixel) with no-op platform behavior. It uses DIO/40 MHz flash settings only for QEMU and starts from a blank virtual eFuse image:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_qemu.sh
+```
+
+The test requires the Espressif QEMU fork with the `esp32s3` machine, verifies that `app_main()` starts and returns without a reset loop, and asserts that reversible bring-up leaves the blank virtual eFuse unchanged.
+
 ### Native host emulation
 
 The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
