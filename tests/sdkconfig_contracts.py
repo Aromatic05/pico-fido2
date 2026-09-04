@@ -28,6 +28,11 @@ def main() -> None:
         raise AssertionError("validated bring-up baseline must explicitly retain debug optimization")
     if "IGNORE_UNKNOWN_FILES_FOR_MANAGED_COMPONENTS" in defaults:
         raise AssertionError("component-manager environment variables do not belong in sdkconfig.defaults")
+    # ESP32-S3 does not support accelerated AES-192; the PIV 5.7 default
+    # management key is AES-192 and must work with the release build profile.
+    for option in ("CONFIG_MBEDTLS_HARDWARE_AES", "CONFIG_MBEDTLS_HARDWARE_GCM"):
+        if f"# {option} is not set" not in defaults or f"{option}=y" in defaults:
+            raise AssertionError(f"AES-192 PIV compatibility requires {option}=n")
     for deprecated in (
         "CONFIG_WPA_MBEDTLS_CRYPTO",
         "CONFIG_ESP32_WIFI_ENABLE_WPA3_SAE",
