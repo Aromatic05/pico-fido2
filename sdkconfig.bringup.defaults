@@ -1,0 +1,3 @@
+# Reversible ESP32-S3 bring-up profile.
+# Keeps KEY3/KEY4 untouched by using development-only root keys.
+CONFIG_PICOKEYS_ESP32_DEV_KEYS=y

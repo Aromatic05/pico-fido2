@@ -163,6 +163,18 @@ cd build
 esptool.py --chip ESP_NAME merge_bin -o pico_fido_esp32.bin @flash_args
 ```
 
+### ESP32-S3 reversible bring-up
+
+Before provisioning eFuse key blocks, the ESP32-S3 can be built with development-only root keys so USB, FIDO, OpenPGP, Wi-Fi, and Bluetooth work can be tested without consuming KEY3/KEY4:
+
+```bash
+rm -rf build-bringup sdkconfig.bringup
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults" idf.py -B build-bringup -DSDKCONFIG=sdkconfig.bringup set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults" idf.py -B build-bringup -DSDKCONFIG=sdkconfig.bringup build
+```
+
+This profile is intentionally insecure and is only for bring-up. It does not write Pico FIDO2 root keys to eFuse.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
