@@ -239,6 +239,15 @@ cmake --build build-host -j
 
 The smoke test drives the emulator through both transport paths: CTAPHID `INIT` plus CTAP2 `authenticatorGetInfo` over the HID TCP transport, and OpenPGP `SELECT` plus `GET DATA 006E` over the raw APDU TCP transport.
 
+Mutating commands also have a hard power-loss durability gate. It waits only for the protocol success response, immediately sends `SIGKILL`, and then restarts against the same `memory.flash`:
+
+```bash
+# The upstream FIDO test environment uses python-fido2.
+python tests/host_powercycle_durability.py build-host/pico_fido2 --iterations 5
+```
+
+The gate covers raw CCID/OATH access-code writes and HID/FIDO Client PIN writes. A successful command response must therefore imply that queued flash writes are already durable.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
