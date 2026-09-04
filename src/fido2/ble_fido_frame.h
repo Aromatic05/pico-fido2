@@ -19,7 +19,7 @@
 #define FIDO_BLE_ERR_BUSY        0x06
 #define FIDO_BLE_ERR_OTHER       0x7F
 
-#define FIDO_BLE_MAX_MESSAGE 2048
+#define FIDO_BLE_MAX_MESSAGE 7609
 
 typedef struct {
     uint8_t command;
