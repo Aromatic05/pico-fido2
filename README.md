@@ -312,6 +312,14 @@ python tests/host_powercycle_durability.py build-host/pico_fido2 --iterations 5
 
 The gate covers raw CCID/OATH access-code writes and HID/FIDO Client PIN writes. A successful command response must therefore imply that queued flash writes are already durable.
 
+PIV compatibility can be exercised against the same native emulator through a containerized vsmartcard/PCSC environment and Yubico's `yubico-piv-tool` 2.5.1 tests:
+
+```bash
+./tools/test_piv_host_container.sh
+```
+
+The gate runs 96 key-generation/deletion cases, 96 certificate/signature cases, 96 attestation cases, and the libykpiv hardware API suite. The only accepted libykpiv mismatch is the expected device-model check for the virtual `Virtual PCD` reader. No physical smart-card device is accessed.
+
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
 1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
