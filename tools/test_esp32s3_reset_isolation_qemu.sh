@@ -88,17 +88,56 @@ python -m esptool --chip esp32s3 merge_bin \
 dd if=/dev/zero of="$run_dir/efuse.bin" bs=1024 count=1 status=none
 efuse_before="$(sha256sum "$run_dir/efuse.bin" | awk '{print $1}')"
 
-"$qemu" -M esp32s3 \
-    -drive file="$run_dir/flash.bin",if=mtd,format=raw \
-    -drive file="$run_dir/efuse.bin",if=none,format=raw,id=efuse \
-    -global driver=nvram.esp32c3.efuse,property=drive,value=efuse \
-    -nic none -nographic -serial mon:stdio \
-    >"$run_dir/qemu.log" 2>&1 &
-qemu_pid=$!
+start_qemu() {
+    "$qemu" -M esp32s3 \
+        -drive file="$run_dir/flash.bin",if=mtd,format=raw \
+        -drive file="$run_dir/efuse.bin",if=none,format=raw,id=efuse \
+        -global driver=nvram.esp32c3.efuse,property=drive,value=efuse \
+        -nic none -nographic -serial mon:stdio \
+        >>"$run_dir/qemu.log" 2>&1 &
+    qemu_pid=$!
+}
+
+: >"$run_dir/qemu.log"
+start_qemu
+
+cut_ready=0
+for _ in $(seq 1 2400); do
+    if grep -aq 'JOURNAL_RECOVERY_QEMU_CUT_READY' "$run_dir/qemu.log"; then
+        cut_ready=1
+        break
+    fi
+    if grep -aq 'RESET_ISOLATION_QEMU_FAIL' "$run_dir/qemu.log"; then
+        break
+    fi
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+        wait "$qemu_pid" || rc=$?
+        tail -200 "$run_dir/qemu.log" >&2
+        echo "QEMU exited before journal cut point: ${rc:-0}" >&2
+        exit 4
+    fi
+    sleep 0.05
+done
+
+if [[ "$cut_ready" != 1 ]]; then
+    tail -240 "$run_dir/qemu.log" >&2
+    echo 'ESP32-S3 journal test did not reach the target-erase cut point' >&2
+    exit 4
+fi
+
+# Simulate abrupt external power removal while the target sector is erased.
+# The same flash image is then reused so boot-time journal recovery must replay
+# the already-published replacement sector.
+kill -9 "$qemu_pid" 2>/dev/null || true
+wait "$qemu_pid" 2>/dev/null || true
+qemu_pid=""
+printf '\n--- QEMU POWER CYCLE ---\n' >>"$run_dir/qemu.log"
+start_qemu
 
 result=""
 for _ in $(seq 1 2400); do
-    if grep -aq 'RESET_ISOLATION_QEMU_PASS' "$run_dir/qemu.log"; then
+    if grep -aq 'JOURNAL_RECOVERY_QEMU_PASS' "$run_dir/qemu.log" && \
+       grep -aq 'RESET_ISOLATION_QEMU_PASS' "$run_dir/qemu.log"; then
         result=pass
         break
     fi
@@ -117,7 +156,7 @@ done
 
 if [[ "$result" != pass ]]; then
     tail -240 "$run_dir/qemu.log" >&2
-    echo 'ESP32-S3 reset-isolation self-test failed or timed out' >&2
+    echo 'ESP32-S3 journal-recovery/reset-isolation self-test failed or timed out' >&2
     exit 4
 fi
 

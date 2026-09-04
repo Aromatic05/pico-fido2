@@ -33,7 +33,10 @@ fi
 
 "$runtime" run --rm -i --network none -v "$PWD:/src:ro" \
     -v "$host_eddsa_dir:/src/pico-keys-sdk/mbedtls:ro" \
-    -e FIDO_PYTEST_TARGET="$pytest_target" "$image" bash -s <<'INNER'
+    -e FIDO_PYTEST_TARGET="$pytest_target" \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_NTH \
+    "$image" bash -s <<'INNER'
 set -euo pipefail
 mkdir -p /work/build /work/run /work/pytest-cache
 cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DENABLE_EDDSA=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
@@ -71,6 +74,14 @@ sleep 1
 kill -0 "$emu_pid" 2>/dev/null || { cat emulator.log >&2; exit 1; }
 
 cd /src/pico-fido
+set +e
 PYTHONPATH=/src/pico-fido/tests \
     pytest -q -o cache_dir=/work/pytest-cache "$FIDO_PYTEST_TARGET"
+pytest_rc=$?
+set -e
+if [[ "$pytest_rc" -ne 0 ]]; then
+    echo '--- emulator log tail ---' >&2
+    tail -200 /work/run/emulator.log >&2 || true
+    exit "$pytest_rc"
+fi
 INNER
