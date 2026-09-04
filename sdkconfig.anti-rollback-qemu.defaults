@@ -1,0 +1,6 @@
+# QEMU-only single-slot anti-rollback policy profile.
+# Production builds require Secure Boot; QEMU may exercise the policy without
+# enabling Secure Boot because ESP32-S3 QEMU cannot reboot through Secure Boot.
+CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y
+CONFIG_PICO_FIDO2_SECURITY_VERSION=2
+# CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP is not set
