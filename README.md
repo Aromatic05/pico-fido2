@@ -286,9 +286,10 @@ After the device is provisioned, firmware updates do not consume any additional 
 ./tools/build_esp32s3_update_bundle.sh build-provisioning build-update-bundle 7.4.1
 ./tools/verify_esp32s3_update_bundle.py build-update-bundle build-provisioning
 ./tools/test_esp32s3_update_bundle.sh build-provisioning
+./tools/test_esp32s3_rom_update_qemu.sh
 ```
 
-The update bundle contains an app-only ciphertext image. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables.
+The update bundle contains an app-only ciphertext image. It must be written as raw ciphertext at `0x20000`; do **not** pass esptool's `--encrypt` flag to an already pre-encrypted update. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gate additionally performs an encrypted app write after Secure Boot and Flash Encryption have been enabled, verifies that the eFuse image is byte-for-byte unchanged, and asserts that the bootloader, partition-table region, and `part0` credential-storage region are untouched.
 
 ### Native host emulation
 

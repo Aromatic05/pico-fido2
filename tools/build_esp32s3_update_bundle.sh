@@ -103,6 +103,9 @@ manifest = {
         'flash_encryption': 'must use existing KEY1 XTS-AES-128 key',
         'efuse_changes': 'none',
         'write_offset': '0x020000',
+        'artifact_format': 'pre-encrypted-ciphertext',
+        'esptool_write_mode': 'raw-no-encrypt',
+        'esptool_encrypt_flag': False,
         'rom_download': 'must remain enabled',
         'usb_serial_jtag_download': 'must remain enabled when used as the physical download transport',
     },
@@ -117,5 +120,6 @@ printf 'Version: %s\n' "$project_ver"
 printf 'Offset: %s\n' "$app_offset"
 printf 'Signed plaintext: %s bytes\n' "$(stat -c %s "$app")"
 printf 'Encrypted update: %s\n' "$(sha256sum "$encrypted" | awk '{print $1}')"
+printf 'Flash mode: raw ciphertext write at 0x20000; DO NOT pass --encrypt\n'
 printf 'eFuse changes required: none\n'
 printf 'No device write was performed.\n'

@@ -76,8 +76,16 @@ def verify(bundle_dir: Path, provision_dir: Path) -> None:
         ])
 
     contract = manifest.get("update_contract", {})
-    if contract.get("efuse_changes") != "none" or contract.get("write_offset") != "0x020000":
-        die("unexpected update contract")
+    expected_contract = {
+        "efuse_changes": "none",
+        "write_offset": "0x020000",
+        "artifact_format": "pre-encrypted-ciphertext",
+        "esptool_write_mode": "raw-no-encrypt",
+        "esptool_encrypt_flag": False,
+    }
+    for key, value in expected_contract.items():
+        if contract.get(key) != value:
+            die(f"unexpected update contract: {key}")
 
     print(f"update: PASS ({encrypted})")
     print(f"version: {manifest.get('project_version')}")
@@ -85,6 +93,7 @@ def verify(bundle_dir: Path, provision_dir: Path) -> None:
     print(f"encrypted sha256: {encrypted_meta['sha256']}")
     print("RSA-PSS signature: PASS")
     print("XTS-AES-128 decrypt/plaintext hash: PASS")
+    print("flash mode: raw ciphertext write; no --encrypt flag")
     print("eFuse changes required: none")
 
 
