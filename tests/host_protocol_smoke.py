@@ -14,6 +14,8 @@ from pathlib import Path
 CCID_PORT = 35963
 HID_PORT = 35962
 CTAPHID_INIT = 0x86
+CTAPHID_MSG = 0x83
+CTAPHID_OTP = 0xF0
 CTAPHID_CBOR = 0x90
 CTAPHID_KEEPALIVE = 0xBB
 CTAPHID_ERROR = 0xBF
@@ -79,11 +81,30 @@ def recv_hid_message(sock: socket.socket, expected_cid: bytes, expected_command:
         return bytes(data[:total])
 
 
-def openpgp_get_data(ccid: socket.socket, tag: int) -> bytes:
+def fido_get_info(hid: socket.socket, cid: bytes) -> bytes:
+    send_frame(hid, hid_init_packet(cid, CTAPHID_CBOR, b"\x04"))
+    response = recv_hid_message(hid, cid, CTAPHID_CBOR)
+    if not response or response[0] != 0x00:
+        raise RuntimeError("CTAP2 authenticatorGetInfo failed")
+    if len(response) < 2 or not 0xA0 <= response[1] <= 0xBF:
+        raise RuntimeError("CTAP2 authenticatorGetInfo did not return a CBOR map")
+    return response
+
+
+def hid_oath_list(hid: socket.socket, cid: bytes) -> bytes:
+    send_frame(hid, hid_init_packet(cid, CTAPHID_OTP, bytes.fromhex("00A10000")))
+    response = recv_hid_message(hid, cid, CTAPHID_OTP)
+    if not response.endswith(b"\x90\x00"):
+        raise RuntimeError(f"HID OATH LIST failed: {response.hex()}")
+    return response
+
+
+def openpgp_get_data(ccid: socket.socket, tag: int, interleave=None) -> bytes:
     command = bytes([0x00, 0xCA, tag >> 8, tag & 0xFF, 0xFE])
     send_frame(ccid, command)
     response = recv_frame(ccid)
     data = bytearray()
+    interleaved = False
 
     while True:
         if len(response) < 2:
@@ -94,6 +115,9 @@ def openpgp_get_data(ccid: socket.socket, tag: int) -> bytes:
             return bytes(data)
         if sw1 != 0x61:
             raise RuntimeError(f"OpenPGP GET DATA failed: {sw1:02x}{sw2:02x}")
+        if interleave is not None and not interleaved:
+            interleave()
+            interleaved = True
         send_frame(ccid, bytes([0x00, 0xC0, 0x00, 0x00, sw2]))
         response = recv_frame(ccid)
 
@@ -126,6 +150,18 @@ def run_smoke(binary: Path) -> None:
             if hid is None:
                 raise RuntimeError("HID emulator did not start")
 
+            piv_select = bytes.fromhex("00A4040005A000000308")
+            send_frame(ccid, piv_select)
+            piv_select_response = recv_frame(ccid)
+            if len(piv_select_response) < 2 or piv_select_response[-2] not in (0x61, 0x90):
+                raise RuntimeError(f"PIV SELECT failed: {piv_select_response.hex()}")
+
+            piv_version = bytes.fromhex("00FD0000")
+            send_frame(ccid, piv_version)
+            version_before = recv_frame(ccid)
+            if not version_before.endswith(b"\x90\x00"):
+                raise RuntimeError(f"PIV VERSION before HID failed: {version_before.hex()}")
+
             nonce = bytes.fromhex("0011223344556677")
             send_frame(hid, hid_init_packet(b"\xff" * 4, CTAPHID_INIT, nonce))
             _, command, init_payload = parse_hid_init(recv_frame(hid))
@@ -135,13 +171,39 @@ def run_smoke(binary: Path) -> None:
             if assigned_cid in (b"\0" * 4, b"\xff" * 4):
                 raise RuntimeError("invalid assigned CTAPHID CID")
 
-            send_frame(hid, hid_init_packet(assigned_cid, CTAPHID_CBOR, b"\x04"))
-            get_info = recv_hid_message(hid, assigned_cid, CTAPHID_CBOR)
-            if not get_info or get_info[0] != 0x00:
-                raise RuntimeError("CTAP2 authenticatorGetInfo failed")
-            if len(get_info) < 2 or not 0xA0 <= get_info[1] <= 0xBF:
-                raise RuntimeError("CTAP2 authenticatorGetInfo did not return a CBOR map")
+            send_frame(ccid, piv_version)
+            version_after_init = recv_frame(ccid)
+            if version_after_init != version_before:
+                raise RuntimeError(
+                    "HID INIT changed the CCID application session: "
+                    f"before={version_before.hex()} after={version_after_init.hex()}"
+                )
+
+            get_info = fido_get_info(hid, assigned_cid)
             print(f"FIDO2 GetInfo: PASS ({len(get_info) - 1} CBOR bytes)")
+
+            send_frame(ccid, piv_version)
+            version_after = recv_frame(ccid)
+            if version_after != version_before:
+                raise RuntimeError(
+                    "HID CTAP2 changed the CCID application session: "
+                    f"before={version_before.hex()} after={version_after.hex()}"
+                )
+
+            u2f_version = bytes.fromhex("0003000000")
+            send_frame(hid, hid_init_packet(assigned_cid, CTAPHID_MSG, u2f_version))
+            u2f_response = recv_hid_message(hid, assigned_cid, CTAPHID_MSG)
+            if u2f_response != b"U2F_V2\x90\x00":
+                raise RuntimeError(f"U2F VERSION failed: {u2f_response.hex()}")
+
+            send_frame(ccid, piv_version)
+            version_after_u2f = recv_frame(ccid)
+            if version_after_u2f != version_before:
+                raise RuntimeError(
+                    "HID U2F changed the CCID application session: "
+                    f"before={version_before.hex()} after={version_after_u2f.hex()}"
+                )
+            print("CCID PIV selection survives HID INIT/CTAP2/U2F: PASS")
 
             select = bytes.fromhex("00A4040006D27600012401")
             send_frame(ccid, select)
@@ -149,10 +211,14 @@ def run_smoke(binary: Path) -> None:
             if not select_response.endswith(b"\x90\x00"):
                 raise RuntimeError("OpenPGP SELECT failed")
 
-            application_data = openpgp_get_data(ccid, 0x006E)
+            def interleave_hid() -> None:
+                fido_get_info(hid, assigned_cid)
+                hid_oath_list(hid, assigned_cid)
+
+            application_data = openpgp_get_data(ccid, 0x006E, interleave=interleave_hid)
             if not application_data.startswith(b"\x4f"):
                 raise RuntimeError("unexpected OpenPGP application-related data")
-            print(f"OpenPGP SELECT/GET DATA: PASS ({len(application_data)} bytes)")
+            print(f"OpenPGP GET RESPONSE survives HID CTAP2/OATH: PASS ({len(application_data)} bytes)")
         finally:
             if hid is not None:
                 hid.close()
