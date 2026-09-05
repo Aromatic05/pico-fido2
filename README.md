@@ -376,7 +376,15 @@ Management over FIDO HID is covered separately using yubikit's YubiKey vendor co
 ./tools/test_ykman_fido_management_container.sh
 ```
 
-This gate verifies FIDO-side read/write configuration, power-cycle persistence, Yubico's hidden `0x400` management-over-CCID capability, FIDO-only mode with CCID removed, restoring CCID through the surviving FIDO management transport, and rejection of configurations that would leave no management transport. USB interface selection remains backward-compatible with legacy `phy` configuration until `USB_ENABLED` has been explicitly written through the management application.
+This gate verifies FIDO-side read/write configuration, power-cycle persistence, Yubico's hidden `0x400` management-over-CCID capability, FIDO-only mode with CCID removed, and restoring CCID through the surviving FIDO management transport. USB interface selection remains backward-compatible with legacy `phy` configuration until `USB_ENABLED` has been explicitly written through the management application.
+
+YubiKey OTP HID management uses yubikit 5.9.2's native 8-byte feature-report protocol and is tested independently:
+
+```bash
+./tools/test_ykman_otp_management_container.sh
+```
+
+The OTP gate exercises `READ_CONFIG`/`WRITE_CONFIG`, switches to a true OTP-only USB configuration, immediately power-cycles after successful programming-sequence responses, restores all USB capabilities through OTP management, and also verifies HMAC-SHA1 slot configuration/calculation and slot deletion across hard power cycles. Because OTP itself now provides a management transport, OTP-only mode no longer needs to be rejected to prevent configuration lockout. No physical device is accessed.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 

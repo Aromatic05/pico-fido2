@@ -113,12 +113,6 @@ assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == 
 session.set_mode(Mode(USB_INTERFACE.OTP | USB_INTERFACE.FIDO))
 mode_enabled = session.read_device_info().config.enabled_capabilities[TRANSPORT.USB]
 assert mode_enabled == (CAPABILITY.OTP | CAPABILITY.U2F | CAPABILITY.FIDO2)
-try:
-    session.write_device_config(DeviceConfig({TRANSPORT.USB: CAPABILITY.OTP}))
-except Exception:
-    pass
-else:
-    raise AssertionError("OTP-only configuration must be rejected to preserve a management transport")
 print("FIDO management power-cycle/re-enable/mode-write: PASS")
 dev.close()
 PY
