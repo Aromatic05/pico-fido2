@@ -23,8 +23,9 @@ if ! "$runtime" image exists "$image" >/dev/null 2>&1; then
         | "$runtime" build -t "$image" -f - .
 fi
 
-"$runtime" run --rm --network none -v "$PWD:/src:ro" "$image" bash -s <<'INNER'
+"$runtime" run --rm -i --network none -v "$PWD:/src:ro" "$image" bash -s <<'INNER'
 set -euo pipefail
+mkdir -p /work
 cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
 cmake --build /work/build -j"$(nproc)" >/work/build.log
 mkdir -p /work/run

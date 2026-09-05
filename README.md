@@ -338,6 +338,22 @@ python tests/host_powercycle_durability.py build-host/pico_fido2 --iterations 5
 
 The gate covers raw CCID/OATH access-code writes and HID/FIDO Client PIN writes. A successful command response must therefore imply that queued flash writes are already durable.
 
+The complete upstream FIDO/U2F/OATH pytest suite can be run in an isolated container against the native emulator:
+
+```bash
+./tools/test_fido_host_container.sh
+```
+
+This gate builds a Release emulator, provides virtual HID and PC/SC transports, and runs the full upstream protocol suite without accessing physical hardware.
+
+OpenPGP has a full native-emulator pytest gate over virtual PC/SC as well:
+
+```bash
+./tools/test_openpgp_host_container.sh
+```
+
+It runs the upstream OpenPGP card suite, including KDF, PIN/admin flows, key generation/import, signing/decryption, attributes, counters, and reset behavior.
+
 PIV compatibility can be exercised against the same native emulator through a containerized vsmartcard/PCSC environment and Yubico's `yubico-piv-tool` 2.5.1 tests:
 
 ```bash
@@ -353,6 +369,14 @@ YubiKey management compatibility is tested separately against `ykman` 5.9.2:
 ```
 
 The management gate verifies device/application discovery, partial configuration merge semantics, power-cycle persistence, configuration-lock redaction and enforcement, correct/wrong lock handling, lock clearing, and USB application updates that carry the management reboot TLV. The test uses only the native emulator and virtual PC/SC reader.
+
+Management over FIDO HID is covered separately using yubikit's YubiKey vendor commands (`0x42` READ_CONFIG and `0x43` WRITE_CONFIG):
+
+```bash
+./tools/test_ykman_fido_management_container.sh
+```
+
+This gate verifies FIDO-side read/write configuration, power-cycle persistence, Yubico's hidden `0x400` management-over-CCID capability, FIDO-only mode with CCID removed, restoring CCID through the surviving FIDO management transport, and rejection of configurations that would leave no management transport. USB interface selection remains backward-compatible with legacy `phy` configuration until `USB_ENABLED` has been explicitly written through the management application.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 
