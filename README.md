@@ -384,7 +384,7 @@ YubiKey OTP HID management uses yubikit 5.9.2's native 8-byte feature-report pro
 ./tools/test_ykman_otp_management_container.sh
 ```
 
-The OTP gate exercises `READ_CONFIG`/`WRITE_CONFIG`, switches to a true OTP-only USB configuration, immediately power-cycles after successful programming-sequence responses, restores all USB capabilities through OTP management, and also verifies HMAC-SHA1 slot configuration/calculation and slot deletion across hard power cycles. Because OTP itself now provides a management transport, OTP-only mode no longer needs to be rejected to prevent configuration lockout. No physical device is accessed.
+The OTP gate exercises YubiKey 5 `READ_CONFIG`/`WRITE_CONFIG` as well as the legacy YubiKey 3/4 `SLOT_DEVICE_CONFIG` (`0x11`) mode path. It switches to a true OTP-only USB configuration, immediately power-cycles after successful programming-sequence responses, restores all USB capabilities through OTP or CCID management, and also verifies HMAC-SHA1 slot configuration/calculation and slot deletion across hard power cycles. Because OTP itself now provides a management transport, OTP-only mode no longer needs to be rejected to prevent configuration lockout. No physical device is accessed.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 

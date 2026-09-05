@@ -187,6 +187,85 @@ with SocketOtpConnection() as conn:
 print('YubiOTP slot delete power-cycle persistence: PASS')
 PY
 
+# YubiKey 3/4 legacy mode frames still use SLOT_DEVICE_CONFIG (0x11).
+python3 - <<'PY'
+import struct
+from otp_socket import SocketOtpConnection
+from yubikit.core import TRANSPORT
+from yubikit.management import CAPABILITY, ManagementSession, Mode, USB_INTERFACE
+with SocketOtpConnection() as conn:
+    session = ManagementSession(conn)
+    mode = Mode(USB_INTERFACE.OTP | USB_INTERFACE.FIDO)
+    session.backend.set_mode(struct.pack('<BBH', mode.code, 9, 0))
+    info = session.read_device_info()
+    enabled = int(info.config.enabled_capabilities[TRANSPORT.USB])
+    expected = int(CAPABILITY.OTP | CAPABILITY.U2F | CAPABILITY.FIDO2)
+    assert enabled == expected
+    assert info.config.challenge_response_timeout == 9
+print('legacy 0x11 OTP+FIDO mode: PASS')
+PY
+kill_emulator_now
+start_emulator
+python3 - <<'PY'
+import struct
+from otp_socket import SocketOtpConnection
+from yubikit.core import TRANSPORT
+from yubikit.management import CAPABILITY, DEVICE_FLAG, ManagementSession, Mode, USB_INTERFACE
+with SocketOtpConnection() as conn:
+    session = ManagementSession(conn)
+    info = session.read_device_info()
+    enabled = int(info.config.enabled_capabilities[TRANSPORT.USB])
+    expected = int(CAPABILITY.OTP | CAPABILITY.U2F | CAPABILITY.FIDO2)
+    assert enabled == expected
+    assert info.config.challenge_response_timeout == 9
+    print('legacy 0x11 OTP+FIDO power-cycle persistence: PASS')
+
+    mode = Mode(USB_INTERFACE.CCID)
+    code = mode.code | int(DEVICE_FLAG.EJECT)
+    session.backend.set_mode(struct.pack('<BBH', code, 0, 42))
+print('legacy 0x11 CCID-only write: PASS')
+PY
+kill_emulator_now
+start_emulator
+python3 - <<'PY'
+from ykman.pcsc import list_devices
+from yubikit.core import TRANSPORT
+from yubikit.core.smartcard import SmartCardConnection
+from yubikit.management import CAPABILITY, DEVICE_FLAG, DeviceConfig, ManagementSession
+
+devices = list_devices('Virtual PCD 00 00')
+assert len(devices) == 1, devices
+with devices[0].open_connection(SmartCardConnection) as conn:
+    session = ManagementSession(conn)
+    info = session.read_device_info()
+    enabled = int(info.config.enabled_capabilities[TRANSPORT.USB])
+    supported = int(info.supported_capabilities[TRANSPORT.USB])
+    ccid_mask = int(CAPABILITY.OATH | CAPABILITY.PIV | CAPABILITY.OPENPGP | CAPABILITY.HSMAUTH) | 0x400
+    assert enabled == (supported & ccid_mask)
+    assert info.config.auto_eject_timeout == 42
+    assert int(info.config.device_flags) & int(DEVICE_FLAG.EJECT)
+    print('legacy 0x11 CCID-only power-cycle via CCID: PASS')
+
+    session.write_device_config(DeviceConfig({TRANSPORT.USB: CAPABILITY(supported)}))
+    restored = session.read_device_info()
+    assert int(restored.config.enabled_capabilities[TRANSPORT.USB]) == supported
+print('CCID management restores legacy mode: PASS')
+PY
+kill_emulator_now
+start_emulator
+python3 - <<'PY'
+from otp_socket import SocketOtpConnection
+from yubikit.core import TRANSPORT
+from yubikit.management import ManagementSession
+with SocketOtpConnection() as conn:
+    session = ManagementSession(conn)
+    info = session.read_device_info()
+    enabled = int(info.config.enabled_capabilities[TRANSPORT.USB])
+    supported = int(info.supported_capabilities[TRANSPORT.USB])
+    assert enabled == supported
+print('legacy restore power-cycle visible over OTP: PASS')
+PY
+
 printf 'ykman 5.9.2 OTP management transport: PASS\n'
 printf 'No physical device was accessed.\n'
 INNER
