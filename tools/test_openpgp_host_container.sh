@@ -41,6 +41,28 @@ emu_pid=$!
 sleep 1
 kill -0 "$emu_pid" 2>/dev/null || { cat emulator.log >&2; exit 1; }
 
+python3 - <<'PYRESET'
+from smartcard.System import readers
+from smartcard.scard import SCARD_RESET_CARD
+
+reader = [r for r in readers() if 'Virtual PCD 00 00' in str(r)][0]
+conn = reader.createConnection(); conn.connect()
+aid = bytes.fromhex('D27600012401')
+_, s1, s2 = conn.transmit([0x00, 0xA4, 0x04, 0x00, len(aid), *aid])
+assert (s1, s2) == (0x90, 0x00), (s1, s2)
+pin = b'123456'
+_, s1, s2 = conn.transmit([0x00, 0x20, 0x00, 0x81, len(pin), *pin])
+assert (s1, s2) == (0x90, 0x00), (s1, s2)
+_, s1, s2 = conn.transmit([0x00, 0x20, 0x00, 0x81])
+assert (s1, s2) == (0x90, 0x00), (s1, s2)
+conn.reconnect(disposition=SCARD_RESET_CARD)
+_, s1, s2 = conn.transmit([0x00, 0xA4, 0x04, 0x00, len(aid), *aid])
+assert (s1, s2) == (0x90, 0x00), (s1, s2)
+_, s1, s2 = conn.transmit([0x00, 0x20, 0x00, 0x81])
+assert s1 == 0x63 and (s2 & 0xF0) == 0xC0, f'PW1 auth survived reset: {s1:02x}{s2:02x}'
+print(f'OpenPGP reset clears PW1 authentication: PASS ({s1:02x}{s2:02x})')
+PYRESET
+
 cd /src/pico-openpgp
 PYTHONPATH=/src/pico-openpgp/tests \
     pytest -q -o cache_dir=/work/pytest-cache tests -W ignore::DeprecationWarning

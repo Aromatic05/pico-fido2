@@ -166,8 +166,13 @@ static void fido_ble_dispatch(void) {
         return;
     }
 
-    select_app(fido_aid + 1, fido_aid[0]);
-    cbor_process_to(CTAPHID_CBOR, rx.data, rx.received_len, ble_response);
+    if (select_app_unchecked(fido_aid + 1, fido_aid[0]) != PICOKEY_OK) {
+        card_release(ble_itf);
+        fido_ble_error(FIDO_BLE_ERR_OTHER);
+        fido_ble_rx_reset(&rx);
+        return;
+    }
+    cbor_process_to(CTAPHID_CBOR, rx.data, rx.received_len, ble_response, FIDO_TRANSPORT_BLE);
     card_start_claimed(ble_itf, cbor_thread);
     processing = true;
     fido_ble_rx_reset(&rx);

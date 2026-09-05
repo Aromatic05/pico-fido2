@@ -1,4 +1,7 @@
-list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/usb_policy.c)
+list(APPEND SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/usb_policy.c
+    ${CMAKE_CURRENT_LIST_DIR}/app_policy.c
+)
 
 if(CONFIG_PICO_FIDO2_BLE)
     list(APPEND SOURCES

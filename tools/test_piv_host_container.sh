@@ -70,6 +70,73 @@ run_cli_stage() {
 }
 
 run_cli_stage version /work/tests/scripts/version.sh
+
+start_emulator
+python3 - <<'PYRESET'
+from smartcard.System import readers
+from smartcard.scard import SCARD_RESET_CARD
+
+reader = [r for r in readers() if 'Virtual PCD 00 00' in str(r)][0]
+conn = reader.createConnection()
+conn.connect()
+aid = bytes.fromhex('A000000308')
+_, sw1, sw2 = conn.transmit([0x00, 0xA4, 0x04, 0x00, len(aid), *aid])
+assert sw1 == 0x61 or (sw1, sw2) == (0x90, 0x00), (sw1, sw2)
+_, sw1, sw2 = conn.transmit([0x00, 0xFD, 0x00, 0x00])
+assert (sw1, sw2) == (0x90, 0x00), (sw1, sw2)
+pin = b'123456\xff\xff'
+_, sw1, sw2 = conn.transmit([0x00, 0x20, 0x00, 0x80, len(pin), *pin])
+assert (sw1, sw2) == (0x90, 0x00), (sw1, sw2)
+_, sw1, sw2 = conn.transmit([0x00, 0x20, 0x00, 0x80])
+assert (sw1, sw2) == (0x90, 0x00), (sw1, sw2)
+conn.reconnect(disposition=SCARD_RESET_CARD)
+# A warm PC/SC reset keeps the selected application but drops PIN/auth state.
+_, sw1, sw2 = conn.transmit([0x00, 0xFD, 0x00, 0x00])
+assert (sw1, sw2) == (0x90, 0x00), f'PIV selection lost across warm reset: {sw1:02x}{sw2:02x}'
+_, sw1, sw2 = conn.transmit([0x00, 0x20, 0x00, 0x80])
+assert sw1 == 0x63 and (sw2 & 0xF0) == 0xC0, f'PIV PIN auth survived reset: {sw1:02x}{sw2:02x}'
+print(f'vpcd warm reset preserves PIV selection and clears PIN auth: PASS ({sw1:02x}{sw2:02x})')
+PYRESET
+stop_emulator
+
+start_emulator
+yubico-piv-tool -r "Virtual PCD 00 00" -agenerate -s9a -ARSA1024 -opublic.pem >/work/move-generate.log 2>&1
+yubico-piv-tool -r "Virtual PCD 00 00" -amove-key -s9a --to-slot=9c >/work/move-key.log 2>&1
+python3 - <<'PYMETA'
+from smartcard.System import readers
+
+reader = [r for r in readers() if 'Virtual PCD 00 00' in str(r)][0]
+conn = reader.createConnection()
+conn.connect()
+aid = bytes.fromhex('A000000308')
+_, sw1, sw2 = conn.transmit([0x00, 0xA4, 0x04, 0x00, len(aid), *aid])
+assert sw1 == 0x61 or (sw1, sw2) == (0x90, 0x00), (sw1, sw2)
+
+def metadata(slot):
+    data, s1, s2 = conn.transmit([0x00, 0xF7, 0x00, slot])
+    return bytes(data), (s1, s2)
+
+source, source_sw = metadata(0x9A)
+assert source_sw != (0x90, 0x00), (source.hex(), source_sw)
+dest, dest_sw = metadata(0x9C)
+assert dest_sw == (0x90, 0x00), (dest.hex(), dest_sw)
+assert dest[:3] == bytes([0x01, 0x01, 0x06]), dest.hex()
+print('PIV move-key metadata follows destination: PASS')
+PYMETA
+yubico-piv-tool -r "Virtual PCD 00 00" -adelete-key -s9c >/work/delete-key.log 2>&1
+python3 - <<'PYDELETE'
+from smartcard.System import readers
+reader = [r for r in readers() if 'Virtual PCD 00 00' in str(r)][0]
+conn = reader.createConnection(); conn.connect()
+aid = bytes.fromhex('A000000308')
+_, s1, s2 = conn.transmit([0x00, 0xA4, 0x04, 0x00, len(aid), *aid])
+assert s1 == 0x61 or (s1, s2) == (0x90, 0x00)
+data, s1, s2 = conn.transmit([0x00, 0xF7, 0x00, 0x9C])
+assert (s1, s2) != (0x90, 0x00), (bytes(data).hex(), s1, s2)
+print('PIV delete-key removes key metadata visibility: PASS')
+PYDELETE
+stop_emulator
+
 run_cli_stage keygen /work/tests/scripts/keygen.sh
 keygen_count=$(grep -Ec '^  Test (RSA1024|RSA2048|ECCP256|ECCP384) in slot ' /work/keygen.log || true)
 [[ "$keygen_count" -eq 96 ]] || { cat /work/keygen.log >&2; echo "unexpected keygen count: $keygen_count" >&2; exit 1; }

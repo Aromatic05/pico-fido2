@@ -58,6 +58,7 @@ stop_emulator() {
 
 start_emulator
 python3 - <<'PY'
+from fido2.ctap import CtapError
 from fido2.hid import CtapHidDevice
 from yubikit.core import TRANSPORT
 from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
@@ -76,6 +77,18 @@ assert enabled & CCID_APPS == CCID_APPS
 assert enabled & 0x400
 print("FIDO READ_CONFIG: PASS")
 
+# A CCID application is not itself a management transport. Without OTP,
+# FIDO HID, or the hidden 0x400 Management-over-CCID bit this would lock
+# the device out of all ykman configuration paths after power-cycle.
+try:
+    session.write_device_config(DeviceConfig({TRANSPORT.USB: CAPABILITY.PIV}))
+except CtapError as exc:
+    assert exc.code == CtapError.ERR.INVALID_PARAMETER
+else:
+    raise AssertionError("PIV-only configuration was accepted without a management transport")
+assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == enabled
+print("management transport lockout guard: PASS")
+
 without_ccid_apps = enabled & ~int(CCID_APPS)
 session.write_device_config(DeviceConfig({TRANSPORT.USB: without_ccid_apps}))
 info = session.read_device_info()
@@ -87,6 +100,7 @@ PY
 stop_emulator
 start_emulator
 python3 - <<'PY'
+from fido2.ctap import CtapError
 from fido2.hid import CtapHidDevice
 from yubikit.core import TRANSPORT
 from yubikit.management import (
@@ -136,6 +150,92 @@ session.set_mode(Mode(USB_INTERFACE.OTP | USB_INTERFACE.FIDO | USB_INTERFACE.CCI
 restored = session.read_device_info().config.enabled_capabilities[TRANSPORT.USB]
 assert restored == info.supported_capabilities[TRANSPORT.USB]
 print("FIDO-only mode survives power-cycle and restores CCID: PASS")
+dev.close()
+PY
+
+stop_emulator
+start_emulator
+python3 - <<'PY'
+from fido2.ctap import CtapError
+from fido2.ctap1 import Ctap1
+from fido2.ctap2 import Ctap2
+from fido2.hid import CtapHidDevice
+from yubikit.core import TRANSPORT
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+
+dev = next(CtapHidDevice.list_devices())
+session = ManagementSession(dev)
+info = session.read_device_info()
+supported = info.supported_capabilities[TRANSPORT.USB]
+assert supported & CAPABILITY.U2F
+assert supported & CAPABILITY.FIDO2
+
+u2f_only_fido_transport = info.config.enabled_capabilities[TRANSPORT.USB] & ~CAPABILITY.FIDO2
+session.write_device_config(DeviceConfig({TRANSPORT.USB: u2f_only_fido_transport}))
+assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == u2f_only_fido_transport
+assert Ctap1(dev).get_version() == "U2F_V2"
+try:
+    Ctap2(dev).get_info()
+except CtapError:
+    pass
+else:
+    raise AssertionError("CTAP2 GetInfo remained available after disabling FIDO2")
+print("FIDO2 disabled while U2F remains: PASS")
+dev.close()
+PY
+
+stop_emulator
+start_emulator
+python3 - <<'PY'
+from fido2.ctap2 import Ctap2
+from fido2.hid import CtapHidDevice
+from yubikit.core import TRANSPORT
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+
+dev = next(CtapHidDevice.list_devices())
+session = ManagementSession(dev)
+info = session.read_device_info()
+enabled = info.config.enabled_capabilities[TRANSPORT.USB]
+assert enabled & CAPABILITY.U2F
+assert not (enabled & CAPABILITY.FIDO2)
+# Management over the surviving FIDO HID transport must still work.
+supported = info.supported_capabilities[TRANSPORT.USB]
+session.write_device_config(DeviceConfig({TRANSPORT.USB: supported}))
+assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == supported
+assert "FIDO_2_0" in Ctap2(dev).get_info().versions
+print("U2F-only FIDO management restores FIDO2: PASS")
+dev.close()
+PY
+
+stop_emulator
+start_emulator
+python3 - <<'PY'
+from fido2.ctap1 import ApduError, Ctap1
+from fido2.ctap2 import Ctap2
+from fido2.hid import CtapHidDevice
+from yubikit.core import TRANSPORT
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+
+dev = next(CtapHidDevice.list_devices())
+session = ManagementSession(dev)
+info = session.read_device_info()
+enabled = info.config.enabled_capabilities[TRANSPORT.USB]
+fido2_only_fido_transport = enabled & ~CAPABILITY.U2F
+session.write_device_config(DeviceConfig({TRANSPORT.USB: fido2_only_fido_transport}))
+assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == fido2_only_fido_transport
+assert "FIDO_2_0" in Ctap2(dev).get_info().versions
+try:
+    Ctap1(dev).get_version()
+except ApduError:
+    pass
+else:
+    raise AssertionError("U2F remained available after disabling U2F")
+print("U2F disabled while FIDO2 remains: PASS")
+
+supported = info.supported_capabilities[TRANSPORT.USB]
+session.write_device_config(DeviceConfig({TRANSPORT.USB: supported}))
+assert Ctap1(dev).get_version() == "U2F_V2"
+print("FIDO2-only FIDO management restores U2F: PASS")
 dev.close()
 PY
 

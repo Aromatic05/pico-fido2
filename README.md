@@ -368,7 +368,7 @@ YubiKey management compatibility is tested separately against `ykman` 5.9.2:
 ./tools/test_ykman_management_container.sh
 ```
 
-The management gate verifies device/application discovery, partial configuration merge semantics, power-cycle persistence, configuration-lock redaction and enforcement, correct/wrong lock handling, lock clearing, and USB application updates that carry the management reboot TLV. The test uses only the native emulator and virtual PC/SC reader.
+The management gate verifies device/application discovery, partial configuration merge semantics, power-cycle persistence, configuration-lock redaction and enforcement, correct/wrong lock handling, lock clearing, USB application updates that carry the management reboot TLV, and a management-over-CCID-only (`0x400`) power-cycle/restore cycle. Together with the FIDO and OTP gates below, every surviving management transport is proven able to recover the full USB capability set. The test uses only the native emulator and virtual PC/SC reader.
 
 Management over FIDO HID is covered separately using yubikit's YubiKey vendor commands (`0x42` READ_CONFIG and `0x43` WRITE_CONFIG):
 
@@ -376,7 +376,7 @@ Management over FIDO HID is covered separately using yubikit's YubiKey vendor co
 ./tools/test_ykman_fido_management_container.sh
 ```
 
-This gate verifies FIDO-side read/write configuration, power-cycle persistence, Yubico's hidden `0x400` management-over-CCID capability, FIDO-only mode with CCID removed, and restoring CCID through the surviving FIDO management transport. USB interface selection remains backward-compatible with legacy `phy` configuration until `USB_ENABLED` has been explicitly written through the management application.
+This gate verifies FIDO-side read/write configuration, power-cycle persistence, Yubico's hidden `0x400` management-over-CCID capability, FIDO-only mode with CCID removed, and restoring CCID through the surviving FIDO management transport. It also verifies that disabling FIDO2 while retaining U2F blocks standard CTAP2 commands without killing the physical FIDO HID management path, allowing FIDO2 to be restored through the same interface. USB interface selection remains backward-compatible with legacy `phy` configuration until `USB_ENABLED` has been explicitly written through the management application.
 
 YubiKey OTP HID management uses yubikit 5.9.2's native 8-byte feature-report protocol and is tested independently:
 
@@ -385,6 +385,14 @@ YubiKey OTP HID management uses yubikit 5.9.2's native 8-byte feature-report pro
 ```
 
 The OTP gate exercises `READ_CONFIG`/`WRITE_CONFIG`, switches to a true OTP-only USB configuration, immediately power-cycles after successful programming-sequence responses, restores all USB capabilities through OTP management, and also verifies HMAC-SHA1 slot configuration/calculation and slot deletion across hard power cycles. Because OTP itself now provides a management transport, OTP-only mode no longer needs to be rejected to prevent configuration lockout. No physical device is accessed.
+
+Application disable semantics are also exercised at the APDU selection boundary:
+
+```bash
+./tools/test_ykman_app_disable_container.sh
+```
+
+The gate disables OTP, U2F, FIDO2, OATH, PIV, and OpenPGP one at a time through `ykman`, power-cycles the emulator, verifies that each disabled application AID is no longer selectable, then re-enables it and confirms selection is restored. PIV is checked through both its standard AID and Yubico's longer alternate AID; the SDK resolves overlapping application names by the longest registered AID before applying the centralized application policy, so a disabled longer PIV AID cannot fall back to the shorter OTP AID. The same policy is checked before every USB APDU dispatch, so already selected PIV, OpenPGP, and OATH sessions are revoked immediately when management disables the application; revocation also discards any partial chained APDU from the old app. The hidden `0x400` management-over-CCID capability is enforced independently from the other CCID applications. `USB_ENABLED` remains transport-scoped: disabling USB FIDO2 does not disable the independent BLE FIDO transport.
 
 The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
 

@@ -136,6 +136,43 @@ ykman -r "$reader" info >/work/info-unlocked.txt
 ! grep -q 'protected by a lock code' /work/info-unlocked.txt
 printf 'lock enforcement/change/clear: PASS\n'
 
+python3 - <<'PYCCIDONLY'
+from ykman.pcsc import list_devices
+from yubikit.core import TRANSPORT
+from yubikit.core.smartcard import SmartCardConnection
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+
+devices = list_devices('Virtual PCD 00 00')
+assert len(devices) == 1, devices
+with devices[0].open_connection(SmartCardConnection) as conn:
+    session = ManagementSession(conn)
+    supported = session.read_device_info().supported_capabilities[TRANSPORT.USB]
+    session.write_device_config(DeviceConfig({TRANSPORT.USB: CAPABILITY(0x400)}))
+    assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == CAPABILITY(0x400)
+print('management-over-CCID only configuration: PASS')
+PYCCIDONLY
+stop_emulator
+start_emulator
+python3 - <<'PYCCIDRESTORE'
+from ykman.pcsc import list_devices
+from yubikit.core import TRANSPORT
+from yubikit.core.smartcard import SmartCardConnection
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+
+devices = list_devices('Virtual PCD 00 00')
+assert len(devices) == 1, devices
+with devices[0].open_connection(SmartCardConnection) as conn:
+    session = ManagementSession(conn)
+    info = session.read_device_info()
+    assert info.config.enabled_capabilities[TRANSPORT.USB] == CAPABILITY(0x400)
+    supported = info.supported_capabilities[TRANSPORT.USB]
+    session.write_device_config(DeviceConfig({TRANSPORT.USB: supported}))
+    assert session.read_device_info().config.enabled_capabilities[TRANSPORT.USB] == supported
+print('management-over-CCID only power-cycle/restore: PASS')
+PYCCIDRESTORE
+stop_emulator
+start_emulator
+
 ykman -r "$reader" config usb --disable OTP --force >/work/disable-otp.txt
 grep -q 'YubiKey will reboot' /work/disable-otp.txt
 stop_emulator

@@ -98,7 +98,7 @@ run_management_action() {
 import sys
 from otp_socket import SocketOtpConnection
 from yubikit.core import TRANSPORT
-from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
+from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession, Mode, USB_INTERFACE
 
 def state(session):
     info = session.read_device_info()
@@ -116,9 +116,10 @@ with SocketOtpConnection() as conn:
     assert supported & int(CAPABILITY.OTP)
 
     if action == "set-otp-only":
-        session.write_device_config(DeviceConfig({TRANSPORT.USB: CAPABILITY.OTP}))
+        # YK5+ set_mode translates to DeviceConfig/WRITE_CONFIG on the OTP backend.
+        session.set_mode(Mode(USB_INTERFACE.OTP))
         assert state(session)[0] == int(CAPABILITY.OTP)
-        print("OTP WRITE_CONFIG to OTP-only: PASS")
+        print("OTP set_mode -> WRITE_CONFIG to OTP-only: PASS")
     elif action == "verify-otp-only":
         assert enabled == int(CAPABILITY.OTP)
         print("OTP-only power-cycle persistence: PASS")
