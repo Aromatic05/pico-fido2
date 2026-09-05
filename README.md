@@ -327,7 +327,7 @@ cmake --build build-host -j
 ./tests/host_protocol_smoke.py build-host/pico_fido2
 ```
 
-The smoke test drives the emulator through both transport paths and deliberately interleaves them: CCID PIV selection must survive HID `INIT`, CTAP2 `authenticatorGetInfo`, and U2F `MSG`, while an OpenPGP `GET RESPONSE` continuation must survive interleaved HID CTAP2 and OATH traffic. This guards the per-transport APDU application/chaining/continuation session state without requiring physical hardware.
+The smoke test drives the emulator through both transport paths and deliberately interleaves them: CCID PIV selection must survive HID `INIT`, CTAP2 `authenticatorGetInfo`, and U2F `MSG`, while an OpenPGP `GET RESPONSE` continuation must survive interleaved HID CTAP2 and OATH traffic. This guards the per-transport APDU application/chaining/continuation session state without requiring physical hardware. The same smoke gate also configures an OATH access code and proves that CCID and HID keep independent validation/challenge state while global access-code changes invalidate stale sessions on every transport.
 
 Mutating commands also have a hard power-loss durability gate. It waits only for the protocol success response, immediately sends `SIGKILL`, and then restarts against the same `memory.flash`:
 

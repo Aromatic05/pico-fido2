@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import socket
 import struct
 import subprocess
@@ -91,12 +93,39 @@ def fido_get_info(hid: socket.socket, cid: bytes) -> bytes:
     return response
 
 
+def hid_oath_apdu(hid: socket.socket, cid: bytes, apdu: bytes) -> bytes:
+    send_frame(hid, hid_init_packet(cid, CTAPHID_OTP, apdu))
+    return recv_hid_message(hid, cid, CTAPHID_OTP)
+
+
 def hid_oath_list(hid: socket.socket, cid: bytes) -> bytes:
-    send_frame(hid, hid_init_packet(cid, CTAPHID_OTP, bytes.fromhex("00A10000")))
-    response = recv_hid_message(hid, cid, CTAPHID_OTP)
-    if not response.endswith(b"\x90\x00"):
+    response = hid_oath_apdu(hid, cid, bytes.fromhex("00A10000"))
+    if not response.startswith(b"\x90\x00"):
         raise RuntimeError(f"HID OATH LIST failed: {response.hex()}")
     return response
+
+
+def raw_apdu(sock: socket.socket, command: bytes) -> tuple[bytes, int]:
+    send_frame(sock, command)
+    response = recv_frame(sock)
+    if len(response) < 2:
+        raise RuntimeError("short APDU response")
+    return response[:-2], int.from_bytes(response[-2:], "big")
+
+
+def tlv_value(data: bytes, tag: int) -> bytes:
+    pos = 0
+    while pos + 2 <= len(data):
+        current = data[pos]
+        length = data[pos + 1]
+        pos += 2
+        if pos + length > len(data):
+            break
+        value = data[pos:pos + length]
+        if current == tag:
+            return value
+        pos += length
+    raise RuntimeError(f"TLV tag {tag:#x} not found in {data.hex()}")
 
 
 def openpgp_get_data(ccid: socket.socket, tag: int, interleave=None) -> bytes:
@@ -219,6 +248,75 @@ def run_smoke(binary: Path) -> None:
             if not application_data.startswith(b"\x4f"):
                 raise RuntimeError("unexpected OpenPGP application-related data")
             print(f"OpenPGP GET RESPONSE survives HID CTAP2/OATH: PASS ({len(application_data)} bytes)")
+
+            # OATH access-code authentication belongs to the transport session.
+            oath_aid = bytes.fromhex("A0000005272101")
+            select_oath = bytes([0x00, 0xA4, 0x04, 0x00, len(oath_aid)]) + oath_aid
+            _, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"CCID OATH SELECT failed: {sw:04x}")
+
+            oath_key = b"kaka blahonga"
+            setup_challenge = bytes(range(1, 9))
+            setup_response = hmac.new(oath_key, setup_challenge, hashlib.sha1).digest()
+            set_code_data = (
+                bytes([0x73, len(oath_key) + 1, 0x21]) + oath_key
+                + bytes([0x74, len(setup_challenge)]) + setup_challenge
+                + bytes([0x75, len(setup_response)]) + setup_response
+            )
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x03, 0x00, 0x00, len(set_code_data)]) + set_code_data)
+            if sw != 0x9000:
+                raise RuntimeError(f"CCID OATH SET CODE failed: {sw:04x}")
+
+            select_data, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"CCID OATH reselect failed: {sw:04x}")
+            device_challenge = tlv_value(select_data, 0x74)
+            validate_response = hmac.new(oath_key, device_challenge, hashlib.sha1).digest()
+            host_challenge = b"12345678"
+            validate_data = (
+                bytes([0x75, len(validate_response)]) + validate_response
+                + bytes([0x74, len(host_challenge)]) + host_challenge
+            )
+            _, sw = raw_apdu(ccid, bytes([0x00, 0xA3, 0x00, 0x00, len(validate_data)]) + validate_data)
+            if sw != 0x9000:
+                raise RuntimeError(f"CCID OATH VALIDATE failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00A10000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"CCID OATH LIST after validate failed: {sw:04x}")
+
+            hid_oath = hid_oath_apdu(hid, assigned_cid, bytes.fromhex("00A10000"))
+            if not hid_oath.endswith(b"\x69\x82"):
+                raise RuntimeError(f"unvalidated HID OATH unexpectedly authorized: {hid_oath.hex()}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00A10000"))
+            if sw != 0x9000:
+                raise RuntimeError(
+                    "HID OATH changed the authenticated CCID OATH session: "
+                    f"CCID LIST returned {sw:04x}"
+                )
+            print("CCID OATH authentication survives unvalidated HID OATH: PASS")
+
+            hid_select = hid_oath_apdu(hid, assigned_cid, select_oath)
+            if not hid_select.startswith(b"\x90\x00"):
+                raise RuntimeError(f"HID OATH SELECT failed: {hid_select.hex()}")
+            hid_challenge = tlv_value(hid_select[2:], 0x74)
+            hid_validate_response = hmac.new(oath_key, hid_challenge, hashlib.sha1).digest()
+            hid_validate_data = (
+                bytes([0x75, len(hid_validate_response)]) + hid_validate_response
+                + bytes([0x74, len(host_challenge)]) + host_challenge
+            )
+            hid_validate_apdu = bytes([0x00, 0xA3, 0x00, 0x00, len(hid_validate_data)]) + hid_validate_data
+            hid_validate = hid_oath_apdu(hid, assigned_cid, hid_validate_apdu)
+            if not hid_validate.startswith(b"\x90\x00"):
+                raise RuntimeError(
+                    "HID OATH validation did not survive transport dispatch selection: "
+                    f"{hid_validate.hex()}"
+                )
+            hid_oath_list(hid, assigned_cid)
+            _, sw = raw_apdu(ccid, bytes.fromhex("00A10000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"HID OATH authentication changed CCID OATH: {sw:04x}")
+            print("CCID and HID OATH authentication sessions are independent: PASS")
         finally:
             if hid is not None:
                 hid.close()
