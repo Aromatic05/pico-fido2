@@ -150,6 +150,26 @@ start_emulator
 run_management_action verify-restored
 
 python3 - <<'PY'
+from ykman.pcsc import list_devices
+from yubikit.core.smartcard import SmartCardConnection
+from yubikit.yubiotp import HmacSha1SlotConfiguration, SLOT, YubiOtpSession
+
+devices = list_devices('Virtual PCD 00 00')
+assert len(devices) == 1, devices
+with devices[0].open_connection(SmartCardConnection) as conn:
+    session = YubiOtpSession(conn)
+    assert not session.get_config_state().is_configured(SLOT.TWO)
+    session.put_configuration(
+        SLOT.TWO,
+        HmacSha1SlotConfiguration(b'CCID-durable-OTP-key'),
+    )
+    assert session.get_config_state().is_configured(SLOT.TWO)
+    session.delete_slot(SLOT.TWO)
+    assert not session.get_config_state().is_configured(SLOT.TWO)
+print('YubiOTP CCID programming-sequence durability: PASS')
+PY
+
+python3 - <<'PY'
 import hashlib, hmac
 from otp_socket import SocketOtpConnection
 from yubikit.yubiotp import HmacSha1SlotConfiguration, SLOT, YubiOtpSession
