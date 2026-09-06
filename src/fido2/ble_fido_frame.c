@@ -6,6 +6,14 @@ void fido_ble_rx_reset(fido_ble_rx_t *rx) {
     memset(rx, 0, sizeof(*rx));
 }
 
+void fido_ble_rx_release(fido_ble_rx_t *rx) {
+    rx->command = 0;
+    rx->next_sequence = 0;
+    rx->expected_len = 0;
+    rx->received_len = 0;
+    rx->active = false;
+}
+
 int fido_ble_rx_feed(fido_ble_rx_t *rx, const uint8_t *fragment, size_t fragment_len) {
     if (fragment_len == 0) {
         return -FIDO_BLE_ERR_INVALID_LEN;

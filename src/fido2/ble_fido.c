@@ -7,6 +7,9 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_att.h"
@@ -48,16 +51,27 @@ static const ble_uuid128_t fido_revision_bitfield_uuid = BLE_UUID128_INIT(
 
 enum fido_ble_attr {
     FIDO_BLE_ATTR_CONTROL_POINT,
+    FIDO_BLE_ATTR_STATUS,
     FIDO_BLE_ATTR_CONTROL_POINT_LENGTH,
     FIDO_BLE_ATTR_REVISION_BITFIELD,
 };
 
 static uint16_t status_handle;
+/* GATT-side state belongs exclusively to the NimBLE host task. */
+static uint16_t gatt_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+static bool gatt_status_subscribed;
+static bool gatt_revision_selected;
+
+/* Core/TX state below belongs exclusively to picokey_extra_transport_task(). */
 static uint16_t connection_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t own_addr_type;
 static bool status_subscribed;
-static bool revision_selected;
-static bool processing;
+typedef enum {
+    FIDO_BLE_CORE_IDLE = 0,
+    FIDO_BLE_CORE_RUNNING,
+    FIDO_BLE_CORE_ABORTED,
+} fido_ble_core_state_t;
+static fido_ble_core_state_t core_state = FIDO_BLE_CORE_IDLE;
 static uint32_t rx_fragment_time;
 static uint8_t ble_itf = ITF_INVALID;
 static uint8_t ble_response[USB_BUFFER_SIZE];
@@ -66,15 +80,84 @@ static fido_ble_tx_t tx;
 static uint8_t tx_payload[FIDO_BLE_MAX_MESSAGE];
 static bool tx_active;
 static bool tx_waiting;
+static SemaphoreHandle_t rx_mutex;
+
+typedef struct {
+    uint8_t command;
+    uint16_t len;
+} fido_ble_request_t;
+
+typedef enum {
+    FIDO_BLE_EVENT_CONNECT = 1,
+    FIDO_BLE_EVENT_DISCONNECT,
+    FIDO_BLE_EVENT_SUBSCRIBE,
+    FIDO_BLE_EVENT_NOTIFY_DONE,
+    FIDO_BLE_EVENT_CANCEL,
+    FIDO_BLE_EVENT_ERROR,
+} fido_ble_event_type_t;
+
+typedef struct {
+    fido_ble_event_type_t type;
+    uint16_t conn_handle;
+    int status;
+    bool enabled;
+    uint8_t error;
+} fido_ble_event_t;
+
+static QueueHandle_t request_queue;
+static QueueHandle_t event_queue;
+static bool event_overflow;
 
 extern const uint8_t fido_aid[];
 extern void *cbor_thread(void *);
-extern bool cancel_button;
 extern bool is_req_button_pending();
 void ble_store_config_init(void);
 
 static int fido_ble_gap_event(struct ble_gap_event *event, void *arg);
 static void fido_ble_advertise(void);
+static void fido_ble_release_request(void);
+
+static void fido_ble_queue_event(fido_ble_event_t event) {
+    if (event_queue == NULL || xQueueSend(event_queue, &event, 0) != pdPASS) {
+        ESP_LOGE(TAG, "event queue full: %d", event.type);
+        __atomic_store_n(&event_overflow, true, __ATOMIC_RELEASE);
+        gatt_status_subscribed = false;
+        gatt_revision_selected = false;
+    }
+}
+
+static void fido_ble_recover_event_overflow(void) {
+    if (!__atomic_exchange_n(&event_overflow, false, __ATOMIC_ACQ_REL)) {
+        return;
+    }
+    connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    status_subscribed = false;
+    tx_active = false;
+    tx_waiting = false;
+    if (core_state == FIDO_BLE_CORE_RUNNING && card_command_is_owned_by(ble_itf)) {
+        button_cancel_request();
+        core_state = FIDO_BLE_CORE_ABORTED;
+    }
+    else if (core_state == FIDO_BLE_CORE_IDLE) {
+        fido_ble_release_request();
+    }
+}
+
+static bool fido_ble_request_pending(void) {
+    return request_queue != NULL && uxQueueMessagesWaiting(request_queue) != 0;
+}
+
+static void fido_ble_release_request(void) {
+    if (request_queue == NULL || rx_mutex == NULL) {
+        return;
+    }
+    xSemaphoreTake(rx_mutex, portMAX_DELAY);
+    fido_ble_request_t request;
+    if (xQueueReceive(request_queue, &request, 0) == pdPASS) {
+        fido_ble_rx_reset(&rx);
+    }
+    xSemaphoreGive(rx_mutex);
+}
 
 static size_t fido_ble_notification_capacity(void) {
     uint16_t mtu = ble_att_mtu(connection_handle);
@@ -133,43 +216,52 @@ static int fido_ble_notify(uint8_t command, const uint8_t *data, uint16_t len) {
     return fido_ble_tx_pump();
 }
 
-static void fido_ble_error(uint8_t error) {
-    fido_ble_notify(FIDO_BLE_CMD_ERROR, &error, 1);
+static int fido_ble_error(uint8_t error) {
+    return fido_ble_notify(FIDO_BLE_CMD_ERROR, &error, 1);
 }
 
-static void fido_ble_dispatch(void) {
-    uint8_t command = rx.command;
+static void fido_ble_dispatch(const fido_ble_request_t *request) {
+    uint8_t command = request->command;
 
     if (command == FIDO_BLE_CMD_CANCEL) {
         if (card_command_is_owned_by(ble_itf)) {
-            cancel_button = true;
+            button_cancel_request();
         }
-        fido_ble_rx_reset(&rx);
+        fido_ble_release_request();
         return;
     }
 
     if (command == FIDO_BLE_CMD_PING) {
-        fido_ble_notify(FIDO_BLE_CMD_PING, rx.data, rx.received_len);
-        fido_ble_rx_reset(&rx);
+        if (fido_ble_notify(FIDO_BLE_CMD_PING, rx.data, request->len) != 0) {
+            fido_ble_release_request();
+        }
         return;
     }
 
     if (command != FIDO_BLE_CMD_MSG) {
-        fido_ble_error(FIDO_BLE_ERR_INVALID_CMD);
-        fido_ble_rx_reset(&rx);
+        if (fido_ble_error(FIDO_BLE_ERR_INVALID_CMD) != 0) {
+            fido_ble_release_request();
+        }
         return;
     }
 
     if (!card_try_claim(ble_itf)) {
-        fido_ble_error(FIDO_BLE_ERR_BUSY);
-        fido_ble_rx_reset(&rx);
+        if (fido_ble_error(FIDO_BLE_ERR_BUSY) != 0) {
+            fido_ble_release_request();
+        }
         return;
     }
 
-    cbor_process_to(CTAPHID_CBOR, rx.data, rx.received_len, ble_response, FIDO_TRANSPORT_BLE);
-    card_start_claimed(ble_itf, cbor_thread);
-    processing = true;
-    fido_ble_rx_reset(&rx);
+    cbor_process_to(CTAPHID_CBOR, rx.data, request->len, ble_response, FIDO_TRANSPORT_BLE);
+    if (!card_start_claimed(ble_itf, cbor_thread)) {
+        card_release(ble_itf);
+        core_state = FIDO_BLE_CORE_IDLE;
+        if (fido_ble_error(FIDO_BLE_ERR_OTHER) != 0) {
+            fido_ble_release_request();
+        }
+        return;
+    }
+    core_state = FIDO_BLE_CORE_RUNNING;
     usb_send_event(EV_CMD_AVAILABLE);
 }
 
@@ -177,6 +269,9 @@ static int fido_ble_control_point_write(struct os_mbuf *om) {
     uint16_t len = OS_MBUF_PKTLEN(om);
     if (len == 0 || len > FIDO_BLE_CONTROL_POINT_LENGTH) {
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (!gatt_status_subscribed || gatt_connection_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     }
 
     uint8_t fragment[FIDO_BLE_CONTROL_POINT_LENGTH];
@@ -186,14 +281,45 @@ static int fido_ble_control_point_write(struct os_mbuf *om) {
         return BLE_ATT_ERR_UNLIKELY;
     }
 
+    if (fido_ble_request_pending()) {
+        if (flat_len == 3 && fragment[0] == FIDO_BLE_CMD_CANCEL &&
+            fragment[1] == 0 && fragment[2] == 0) {
+            fido_ble_queue_event((fido_ble_event_t){ .type = FIDO_BLE_EVENT_CANCEL });
+            return 0;
+        }
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+
+    xSemaphoreTake(rx_mutex, portMAX_DELAY);
+    if (fido_ble_request_pending()) {
+        xSemaphoreGive(rx_mutex);
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
     int result = fido_ble_rx_feed(&rx, fragment, flat_len);
     rx_fragment_time = board_millis();
     if (result < 0) {
-        fido_ble_error((uint8_t)-result);
+        uint8_t error = (uint8_t)-result;
         fido_ble_rx_reset(&rx);
+        xSemaphoreGive(rx_mutex);
+        fido_ble_queue_event((fido_ble_event_t){
+            .type = FIDO_BLE_EVENT_ERROR,
+            .error = error,
+        });
     }
     else if (result == 1) {
-        fido_ble_dispatch();
+        fido_ble_request_t request = {
+            .command = rx.command,
+            .len = rx.received_len,
+        };
+        if (xQueueSend(request_queue, &request, 0) != pdPASS) {
+            fido_ble_rx_reset(&rx);
+            xSemaphoreGive(rx_mutex);
+            return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+        }
+        xSemaphoreGive(rx_mutex);
+    }
+    else {
+        xSemaphoreGive(rx_mutex);
     }
     return 0;
 }
@@ -205,7 +331,7 @@ static int fido_ble_access(uint16_t conn_handle, uint16_t attr_handle,
     enum fido_ble_attr attr = (enum fido_ble_attr)(uintptr_t)arg;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attr == FIDO_BLE_ATTR_CONTROL_POINT) {
-        if (!revision_selected) {
+        if (!gatt_revision_selected) {
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
         return fido_ble_control_point_write(ctxt->om);
@@ -231,7 +357,7 @@ static int fido_ble_access(uint16_t conn_handle, uint16_t attr_handle,
                 len != 1 || value != FIDO_BLE_REVISION_FIDO2) {
                 return BLE_ATT_ERR_UNLIKELY;
             }
-            revision_selected = true;
+            gatt_revision_selected = true;
             return 0;
         }
     }
@@ -252,6 +378,8 @@ static const struct ble_gatt_svc_def fido_ble_services[] = {
             },
             {
                 .uuid = &fido_status_uuid.u,
+                .access_cb = fido_ble_access,
+                .arg = (void *)(uintptr_t)FIDO_BLE_ATTR_STATUS,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &status_handle,
             },
@@ -317,49 +445,56 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
             fido_ble_advertise();
             return 0;
         }
-        connection_handle = event->connect.conn_handle;
-        status_subscribed = false;
-        revision_selected = false;
-        tx_active = false;
-        tx_waiting = false;
-        fido_ble_rx_reset(&rx);
-        ble_gap_security_initiate(connection_handle);
+        gatt_connection_handle = event->connect.conn_handle;
+        gatt_status_subscribed = false;
+        gatt_revision_selected = false;
+        if (!fido_ble_request_pending()) {
+            xSemaphoreTake(rx_mutex, portMAX_DELAY);
+            fido_ble_rx_reset(&rx);
+            xSemaphoreGive(rx_mutex);
+        }
+        fido_ble_queue_event((fido_ble_event_t){
+            .type = FIDO_BLE_EVENT_CONNECT,
+            .conn_handle = event->connect.conn_handle,
+        });
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        if (processing && card_command_is_owned_by(ble_itf)) {
-            cancel_button = true;
+        fido_ble_queue_event((fido_ble_event_t){
+            .type = FIDO_BLE_EVENT_DISCONNECT,
+            .conn_handle = event->disconnect.conn.conn_handle,
+        });
+        gatt_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        gatt_status_subscribed = false;
+        gatt_revision_selected = false;
+        if (!fido_ble_request_pending()) {
+            xSemaphoreTake(rx_mutex, portMAX_DELAY);
+            fido_ble_rx_reset(&rx);
+            xSemaphoreGive(rx_mutex);
         }
-        connection_handle = BLE_HS_CONN_HANDLE_NONE;
-        status_subscribed = false;
-        revision_selected = false;
-        tx_active = false;
-        tx_waiting = false;
-        fido_ble_rx_reset(&rx);
         fido_ble_advertise();
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == status_handle) {
-            status_subscribed = event->subscribe.cur_notify != 0;
+            gatt_status_subscribed = event->subscribe.cur_notify != 0;
+            fido_ble_queue_event((fido_ble_event_t){
+                .type = FIDO_BLE_EVENT_SUBSCRIBE,
+                .conn_handle = event->subscribe.conn_handle,
+                .enabled = gatt_status_subscribed,
+            });
         }
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_TX:
-        if (!tx_active || event->notify_tx.conn_handle != connection_handle ||
-            event->notify_tx.attr_handle != status_handle || event->notify_tx.indication) {
+        if (event->notify_tx.attr_handle != status_handle || event->notify_tx.indication) {
             return 0;
         }
-        if (event->notify_tx.status != 0 && event->notify_tx.status != BLE_HS_EDONE) {
-            ESP_LOGE(TAG, "notification failed: %d", event->notify_tx.status);
-            tx_active = false;
-            tx_waiting = false;
-            return 0;
-        }
-        tx_waiting = false;
-        if (fido_ble_tx_done(&tx)) {
-            tx_active = false;
-        }
+        fido_ble_queue_event((fido_ble_event_t){
+            .type = FIDO_BLE_EVENT_NOTIFY_DONE,
+            .conn_handle = event->notify_tx.conn_handle,
+            .status = event->notify_tx.status,
+        });
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -393,8 +528,103 @@ static void fido_ble_host_task(void *arg) {
     nimble_port_freertos_deinit();
 }
 
+static void fido_ble_handle_event(const fido_ble_event_t *event) {
+    switch (event->type) {
+    case FIDO_BLE_EVENT_CONNECT:
+        connection_handle = event->conn_handle;
+        status_subscribed = false;
+        tx_active = false;
+        tx_waiting = false;
+        break;
+
+    case FIDO_BLE_EVENT_DISCONNECT:
+        if (connection_handle == event->conn_handle) {
+            connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        }
+        status_subscribed = false;
+        tx_active = false;
+        tx_waiting = false;
+        if (core_state == FIDO_BLE_CORE_RUNNING && card_command_is_owned_by(ble_itf)) {
+            button_cancel_request();
+            core_state = FIDO_BLE_CORE_ABORTED;
+        }
+        else if (core_state == FIDO_BLE_CORE_IDLE) {
+            fido_ble_release_request();
+        }
+        break;
+
+    case FIDO_BLE_EVENT_SUBSCRIBE:
+        if (event->conn_handle != connection_handle) {
+            break;
+        }
+        status_subscribed = event->enabled;
+        if (!status_subscribed) {
+            tx_active = false;
+            tx_waiting = false;
+            if (core_state == FIDO_BLE_CORE_RUNNING && card_command_is_owned_by(ble_itf)) {
+                button_cancel_request();
+                core_state = FIDO_BLE_CORE_ABORTED;
+            }
+            else if (core_state == FIDO_BLE_CORE_IDLE) {
+                fido_ble_release_request();
+            }
+        }
+        break;
+
+    case FIDO_BLE_EVENT_NOTIFY_DONE:
+        if (!tx_active || event->conn_handle != connection_handle) {
+            break;
+        }
+        if (event->status != 0 && event->status != BLE_HS_EDONE) {
+            ESP_LOGE(TAG, "notification failed: %d", event->status);
+            tx_active = false;
+            tx_waiting = false;
+            if (core_state == FIDO_BLE_CORE_IDLE) {
+                fido_ble_release_request();
+            }
+            break;
+        }
+        tx_waiting = false;
+        if (fido_ble_tx_done(&tx)) {
+            tx_active = false;
+            if (core_state == FIDO_BLE_CORE_IDLE) {
+                fido_ble_release_request();
+            }
+        }
+        break;
+
+    case FIDO_BLE_EVENT_CANCEL:
+        if (core_state == FIDO_BLE_CORE_RUNNING && card_command_is_owned_by(ble_itf)) {
+            button_cancel_request();
+        }
+        break;
+
+    case FIDO_BLE_EVENT_ERROR:
+        if (!tx_active) {
+            fido_ble_error(event->error);
+        }
+        break;
+    }
+}
+
+static void fido_ble_process_events(void) {
+    fido_ble_event_t event;
+    while (xQueueReceive(event_queue, &event, 0) == pdPASS) {
+        fido_ble_handle_event(&event);
+    }
+}
+
 void fido_ble_init(void) {
     ble_itf = card_register_interface(500);
+    core_state = FIDO_BLE_CORE_IDLE;
+    rx_mutex = xSemaphoreCreateMutex();
+    request_queue = xQueueCreate(1, sizeof(fido_ble_request_t));
+    event_queue = xQueueCreate(16, sizeof(fido_ble_event_t));
+    event_overflow = false;
+    assert(rx_mutex != NULL && request_queue != NULL && event_queue != NULL);
+    gatt_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    gatt_status_subscribed = false;
+    gatt_revision_selected = false;
     fido_ble_rx_reset(&rx);
 
     ESP_ERROR_CHECK(nimble_port_init());
@@ -417,7 +647,7 @@ void fido_ble_init(void) {
 
     static char firmware_revision[16];
     snprintf(firmware_revision, sizeof(firmware_revision), "%u.%u",
-             PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR);
+             PICO_FIDO_DEVICE_VERSION_MAJOR, PICO_FIDO_DEVICE_VERSION_MINOR);
     ESP_ERROR_CHECK(ble_svc_dis_manufacturer_name_set("Pico FIDO2"));
     ESP_ERROR_CHECK(ble_svc_dis_model_number_set("ESP32-S3"));
     ESP_ERROR_CHECK(ble_svc_dis_firmware_revision_set(firmware_revision));
@@ -429,30 +659,66 @@ void fido_ble_init(void) {
 }
 
 void fido_ble_task(void) {
+    fido_ble_recover_event_overflow();
+    fido_ble_process_events();
+
+    if (!fido_ble_request_pending()) {
+        bool expired = false;
+        xSemaphoreTake(rx_mutex, portMAX_DELAY);
+        if (!fido_ble_request_pending() && rx.active &&
+            board_millis() - rx_fragment_time > FIDO_BLE_FRAGMENT_TIMEOUT_MS) {
+            fido_ble_rx_reset(&rx);
+            expired = true;
+        }
+        xSemaphoreGive(rx_mutex);
+        if (expired && !tx_active) {
+            fido_ble_error(FIDO_BLE_ERR_REQ_TIMEOUT);
+        }
+    }
+
     if (tx_active && !tx_waiting) {
-        fido_ble_tx_pump();
+        if (fido_ble_tx_pump() != 0 && core_state == FIDO_BLE_CORE_IDLE) {
+            fido_ble_release_request();
+        }
     }
 
-    if (rx.active && board_millis() - rx_fragment_time > FIDO_BLE_FRAGMENT_TIMEOUT_MS) {
-        fido_ble_error(FIDO_BLE_ERR_REQ_TIMEOUT);
-        fido_ble_rx_reset(&rx);
-    }
-
-    if (!processing) {
+    if (core_state == FIDO_BLE_CORE_IDLE) {
+        if (!tx_active && fido_ble_request_pending()) {
+            fido_ble_request_t request;
+            if (xQueuePeek(request_queue, &request, 0) == pdPASS) {
+                fido_ble_dispatch(&request);
+            }
+        }
         return;
     }
     if (!card_command_is_owned_by(ble_itf)) {
-        processing = false;
-        fido_ble_error(FIDO_BLE_ERR_BUSY);
+        core_state = FIDO_BLE_CORE_IDLE;
+        if (fido_ble_error(FIDO_BLE_ERR_BUSY) != 0) {
+            fido_ble_release_request();
+        }
         return;
     }
 
     int status = card_status(ble_itf);
     if (status == PICOKEY_OK) {
+        if (core_state == FIDO_BLE_CORE_ABORTED ||
+            connection_handle == BLE_HS_CONN_HANDLE_NONE || !status_subscribed) {
+            card_release(ble_itf);
+            core_state = FIDO_BLE_CORE_IDLE;
+            tx_active = false;
+            tx_waiting = false;
+            fido_ble_release_request();
+            return;
+        }
         uint16_t response_len = finished_data_size;
         if (!tx_active && fido_ble_notify(FIDO_BLE_CMD_MSG, ble_response, response_len) == 0) {
             card_release(ble_itf);
-            processing = false;
+            core_state = FIDO_BLE_CORE_IDLE;
+        }
+        else if (!tx_active) {
+            card_release(ble_itf);
+            core_state = FIDO_BLE_CORE_IDLE;
+            fido_ble_release_request();
         }
     }
     else if (status == PICOKEY_ERR_BLOCKED && !tx_active) {

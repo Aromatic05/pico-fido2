@@ -21,6 +21,17 @@ static char softap_ssid[33];
 static bool commissioning_started;
 static int (*previous_button_pressed_cb)(uint8_t);
 
+static void init_network_stack(void) {
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(err);
+    }
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(err);
+    }
+}
+
 static const char index_html[] =
     "<!doctype html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -105,8 +116,7 @@ static void fido_wifi_start(void) {
     snprintf(softap_ssid, sizeof(softap_ssid), "%s-%02X%02X",
              CONFIG_PICO_FIDO2_WIFI_SSID_PREFIX, mac[4], mac[5]);
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    init_network_stack();
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();

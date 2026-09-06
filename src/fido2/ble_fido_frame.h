@@ -40,6 +40,7 @@ typedef struct {
 } fido_ble_tx_t;
 
 void fido_ble_rx_reset(fido_ble_rx_t *rx);
+void fido_ble_rx_release(fido_ble_rx_t *rx);
 int fido_ble_rx_feed(fido_ble_rx_t *rx, const uint8_t *fragment, size_t fragment_len);
 
 void fido_ble_tx_init(fido_ble_tx_t *tx, uint8_t command, const uint8_t *data, uint16_t len);

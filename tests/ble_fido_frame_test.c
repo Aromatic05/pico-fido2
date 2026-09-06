@@ -54,6 +54,20 @@ static void test_invalid_length(void) {
     assert(fido_ble_rx_feed(&rx, frame, sizeof(frame)) == -FIDO_BLE_ERR_INVALID_LEN);
 }
 
+static void test_release_preserves_payload(void) {
+    fido_ble_rx_t rx;
+    fido_ble_rx_reset(&rx);
+    const uint8_t frame[] = {FIDO_BLE_CMD_MSG, 0, 3, 0x04, 0xaa, 0x55};
+    assert(fido_ble_rx_feed(&rx, frame, sizeof(frame)) == 1);
+    fido_ble_rx_release(&rx);
+    assert(!rx.active);
+    assert(rx.command == 0);
+    assert(rx.expected_len == 0);
+    assert(rx.received_len == 0);
+    const uint8_t expected[] = {0x04, 0xaa, 0x55};
+    assert(memcmp(rx.data, expected, sizeof(expected)) == 0);
+}
+
 
 static void test_zero_length_tx(void) {
     fido_ble_tx_t tx;
@@ -113,6 +127,7 @@ int main(void) {
     test_collision_busy();
     test_invalid_sequence();
     test_invalid_length();
+    test_release_preserves_payload();
     test_zero_length_tx();
     test_tx_round_trip();
     test_max_message_round_trip();
