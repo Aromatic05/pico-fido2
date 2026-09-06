@@ -304,7 +304,18 @@ After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabl
     --manifest build-provisioning/manifest.json
 ```
 
-Neither `preflight` nor `verify-device` has an apply/write option. The current tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning also requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. The current tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning also requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+
+After the encrypted image has been programmed and the development Flash Encryption state plus Secure Boot have both been enabled, use the final read-only verifier before treating the device as a secured candidate:
+
+```bash
+./tools/esp32s3_provision.py verify-secure \
+    --port /dev/ttyACM0 \
+    --expect-mac 12:34:56:78:9a:bc \
+    --manifest build-provisioning/manifest.json
+```
+
+`verify-secure` intentionally accepts only the current reversible experiment policy: Secure Boot enabled, `SPI_BOOT_CRYPT_CNT=0b001`, `SECURE_VERSION=0`, ROM and USB Serial/JTAG recovery still enabled, and KEY0/KEY1/KEY3/KEY4 purposes/protection/readable material matching the provisioning manifest. It has no apply/write option. A more hardened production eFuse state is a separate policy and is not silently treated as equivalent to this bring-up state.
 
 For experiments the plan uses `SPI_BOOT_CRYPT_CNT=0b001` and leaves JTAG/ROM download available. Production hardening is intentionally a separate irreversible step.
 
@@ -326,7 +337,7 @@ A fully host-prepared 4 MiB security image can then be built without any connect
 
 The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2, requires pre-provisioned KEY3/KEY4, sets Flash Encryption to `REQUIRE_ALREADY_ENABLED`, XTS-encrypts the bootloader, partition table, application and initially erased `part0`, and decrypts every region again for byte-for-byte verification. The standalone verifier independently checks bundle/provisioning manifest hashes, decrypts all regions, verifies plaintext hashes, verifies the bootloader/application RSA-PSS signatures, and checks that initial `part0` decrypts to erased flash. Neither tool contains a device flash or eFuse write action.
 
-The intended first hardware boot order is therefore: verify the untouched board baseline with `preflight`, provision KEY0/KEY1/KEY3/KEY4, verify those key blocks with `verify-device`, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot, and `SECURE_VERSION` remains zero throughout initial provisioning.
+The intended first hardware boot order is therefore: verify the untouched board baseline with `preflight`, provision KEY0/KEY1/KEY3/KEY4, verify those key blocks with `verify-device`, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), enable Secure Boot last, and then confirm the final eFuse/key state with `verify-secure`. The firmware is not expected to create any root key during that boot, and `SECURE_VERSION` remains zero throughout initial provisioning.
 
 After the device is provisioned, firmware updates do not consume any additional eFuse key slot or `SECURE_VERSION` bit. Keep the same Secure Boot signing key and per-device Flash Encryption key, choose an application security epoch, build a signed application, and pre-encrypt it for the fixed factory-app offset (`0x20000`):
 

@@ -19,6 +19,8 @@ python3 -m py_compile "$tool" tests/esp32s3_provision_preflight_test.py
     || fail 'preflight unexpectedly exposes --apply'
 ! "$tool" verify-device --help | grep -q -- '--apply' \
     || fail 'verify-device unexpectedly exposes --apply'
+! "$tool" verify-secure --help | grep -q -- '--apply' \
+    || fail 'verify-secure unexpectedly exposes --apply'
 
 set +e
 "$tool" preflight --port /dev/does-not-exist >"$run_dir/missing-mac.txt" 2>&1
@@ -28,6 +30,16 @@ set -e
 grep -q 'real-device provisioning inspection requires --expect-mac' "$run_dir/missing-mac.txt"
 ! grep -q 'Could not open' "$run_dir/missing-mac.txt" \
     || fail 'missing MAC guard attempted to open the serial port'
+
+set +e
+"$tool" verify-secure --port /dev/does-not-exist \
+    --manifest build-provisioning/manifest.json >"$run_dir/secure-missing-mac.txt" 2>&1
+secure_missing_mac_rc=$?
+set -e
+[[ "$secure_missing_mac_rc" -ne 0 ]] || fail 'unguarded real-device verify-secure unexpectedly succeeded'
+grep -q 'real-device provisioning inspection requires --expect-mac' "$run_dir/secure-missing-mac.txt"
+! grep -q 'Could not open' "$run_dir/secure-missing-mac.txt" \
+    || fail 'verify-secure missing MAC guard attempted to open the serial port'
 
 [[ -n "${IDF_PATH:-}" ]] || fail 'IDF_PATH is not set; activate ESP-IDF 5.5 first'
 efuse="$run_dir/blank-efuse.bin"
@@ -46,7 +58,7 @@ after="$(sha256sum "$efuse" | awk '{print $1}')"
 printf 'ESP32-S3 provisioning preflight gate: PASS\n'
 printf 'blank KEY0/1/3/4 inspection: PASS\n'
 printf 'real-device expected-MAC guard before port open: PASS\n'
-printf 'read-only CLI surface: PASS\n'
+printf 'preflight/verify-device/verify-secure read-only CLI surface: PASS\n'
 printf 'repeat inspection no-write: PASS\n'
 printf 'SECURE_VERSION apply path not exercised\n'
 printf 'No physical device was accessed.\n'

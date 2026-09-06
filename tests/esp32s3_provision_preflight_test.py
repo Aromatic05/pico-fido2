@@ -157,6 +157,47 @@ def main() -> None:
         "Secure Boot",
     )
 
+    secured = replace(configured, secure_boot=True, flash_encryption_raw=0x1)
+    provision.validate_secure_device_state(secured, expected)
+    expect_reject(
+        lambda: provision.validate_secure_device_state(replace(secured, secure_boot=False), expected),
+        "Secure Boot is not enabled",
+    )
+    expect_reject(
+        lambda: provision.validate_secure_device_state(replace(secured, flash_encryption_raw=0x0), expected),
+        "SPI_BOOT_CRYPT_CNT=0b001",
+    )
+    expect_reject(
+        lambda: provision.validate_secure_device_state(replace(secured, flash_encryption_raw=0x3), expected),
+        "SPI_BOOT_CRYPT_CNT=0b001",
+    )
+    expect_reject(
+        lambda: provision.validate_secure_device_state(
+            replace(secured, security_version_raw=1, security_floor=1), expected
+        ),
+        "SECURE_VERSION must remain 0",
+    )
+    expect_reject(
+        lambda: provision.validate_secure_device_state(
+            replace(secured, download_mode_enabled=False), expected
+        ),
+        "ROM download recovery",
+    )
+    expect_reject(
+        lambda: provision.validate_secure_device_state(
+            replace(secured, usb_download_mode_enabled=False), expected
+        ),
+        "USB Serial/JTAG ROM download recovery",
+    )
+    secure_bad_keys = dict(secured.keys)
+    secure_bad_keys[4] = replace(secure_bad_keys[4], value=b"\x55" * 32)
+    expect_reject(
+        lambda: provision.validate_secure_device_state(
+            replace(secured, keys=secure_bad_keys), expected
+        ),
+        "KEY4 readable key material",
+    )
+
     print("ESP32-S3 provisioning preflight contracts: PASS")
 
 

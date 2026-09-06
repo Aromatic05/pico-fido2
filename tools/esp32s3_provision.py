@@ -351,6 +351,13 @@ def validate_provisioned_device_state(
     expected: dict[int, tuple[str, bool, bytes | None]],
 ) -> None:
     validate_pre_enable_state(state)
+    validate_provisioned_key_layout(state, expected)
+
+
+def validate_provisioned_key_layout(
+    state: ProvisioningDeviceState,
+    expected: dict[int, tuple[str, bool, bytes | None]],
+) -> None:
     for index in PROVISION_KEY_BLOCKS:
         key = state.keys[index]
         purpose, readable, value = expected[index]
@@ -368,12 +375,39 @@ def validate_provisioned_device_state(
             raise SystemExit(f"KEY{index} readable key material does not match provisioning manifest")
 
 
-def provisioning_state_command(args: argparse.Namespace, *, provisioned: bool) -> None:
+def validate_secure_device_state(
+    state: ProvisioningDeviceState,
+    expected: dict[int, tuple[str, bool, bytes | None]],
+) -> None:
+    if not state.secure_boot:
+        raise SystemExit("Secure Boot is not enabled")
+    if state.flash_encryption_raw != 0x1:
+        raise SystemExit(
+            "experimental secure state requires SPI_BOOT_CRYPT_CNT=0b001, "
+            f"found 0x{state.flash_encryption_raw:x}"
+        )
+    if state.security_floor != 0:
+        raise SystemExit(
+            f"SECURE_VERSION must remain 0 in the current safe provisioning phase, found {state.security_floor}"
+        )
+    if not state.download_mode_enabled:
+        raise SystemExit("ROM download recovery is disabled")
+    if not state.usb_download_mode_enabled:
+        raise SystemExit("USB Serial/JTAG ROM download recovery is disabled")
+    validate_provisioned_key_layout(state, expected)
+
+
+def guarded_provisioning_state(args: argparse.Namespace) -> ProvisioningDeviceState:
     if args.port is not None and args.expect_mac is None:
         raise SystemExit("real-device provisioning inspection requires --expect-mac")
     state = read_provisioning_state(port=args.port, virt_file=args.virt_file)
     if args.expect_mac is not None and args.expect_mac != state.mac:
         raise SystemExit(f"expected MAC {args.expect_mac}, device reports {state.mac}")
+    return state
+
+
+def provisioning_state_command(args: argparse.Namespace, *, provisioned: bool) -> None:
+    state = guarded_provisioning_state(args)
 
     if provisioned:
         verify_manifest(args.manifest, quiet=True)
@@ -399,6 +433,26 @@ def provisioning_state_command(args: argparse.Namespace, *, provisioned: bool) -
     else:
         print("KEY0/1/3/4 empty:    PASS")
         print("key blocks writeable: PASS")
+    print("device write:        no")
+
+
+def secure_state_command(args: argparse.Namespace) -> None:
+    state = guarded_provisioning_state(args)
+    verify_manifest(args.manifest, quiet=True)
+    expected = expected_provisioning_material(args.manifest)
+    validate_secure_device_state(state, expected)
+
+    source = str(args.virt_file) if args.virt_file is not None else args.port
+    print("ESP32-S3 secured-device verification: PASS")
+    print(f"source:              {source}")
+    print(f"device MAC:          {state.mac}")
+    print("Secure Boot:         enabled")
+    print("Flash Encryption:    enabled (SPI_BOOT_CRYPT_CNT=0b001)")
+    print("SECURE_VERSION:      0")
+    print("ROM recovery:        enabled")
+    print("KEY0/1/3/4 layout:   PASS")
+    print("readable key checks: PASS (KEY0/KEY3/KEY4)")
+    print("KEY1 read protect:   PASS")
     print("device write:        no")
 
 
@@ -640,6 +694,12 @@ def main() -> None:
     verify_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
     verify_device.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
     verify_device.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    verify_secure = sub.add_parser("verify-secure", help="read-only verification after Flash Encryption and Secure Boot enablement")
+    verify_secure_source = verify_secure.add_mutually_exclusive_group(required=True)
+    verify_secure_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
+    verify_secure_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
+    verify_secure.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    verify_secure.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
     secver = sub.add_parser("security-version", help="plan or apply the anti-rollback SECURE_VERSION floor")
     source = secver.add_mutually_exclusive_group(required=True)
     source.add_argument("--current", type=int, help="offline current floor (0..16)")
@@ -668,6 +728,8 @@ def main() -> None:
         provisioning_state_command(args, provisioned=False)
     elif args.command == "verify-device":
         provisioning_state_command(args, provisioned=True)
+    elif args.command == "verify-secure":
+        secure_state_command(args)
     else:
         security_version_command(args)
 
