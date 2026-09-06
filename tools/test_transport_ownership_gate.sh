@@ -15,6 +15,20 @@ cmake --build build-host -j2
 python tests/host_protocol_smoke.py build-host/pico_fido2
 python tests/host_transport_contention.py build-host/pico_fido2 --iterations 50
 
+cmake -S . -B build-host-analyzer \
+    -DENABLE_EMULATION=1 \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_C_FLAGS='-fanalyzer -Wno-analyzer-too-complex' \
+    -DCMAKE_CXX_FLAGS='-fanalyzer -Wno-analyzer-too-complex'
+cmake --build build-host-analyzer -j2
+
+cmake -S . -B build-host-frame \
+    -DENABLE_EMULATION=1 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS='-Wframe-larger-than=8192 -Werror=frame-larger-than=8192' \
+    -DCMAKE_CXX_FLAGS='-Wframe-larger-than=8192 -Werror=frame-larger-than=8192'
+cmake --build build-host-frame -j2
+
 cmake -S . -B build-host-asan \
     -DENABLE_EMULATION=1 \
     -DCMAKE_BUILD_TYPE=Debug \

@@ -20,6 +20,11 @@ LED = SDK / "led" / "led.c"
 BLE = ROOT / "src" / "fido2" / "ble_fido.c"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
+CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
+GET_ASSERTION = ROOT / "pico-fido" / "src" / "fido" / "cbor_get_assertion.c"
+MAKE_CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "cbor_make_credential.c"
+CTAP_H = ROOT / "pico-fido" / "src" / "fido" / "ctap.h"
+AUTHENTICATE = ROOT / "pico-fido" / "src" / "fido" / "cmd_authenticate.c"
 PIV = ROOT / "pico-openpgp" / "src" / "openpgp" / "piv.c"
 CMAKE = ROOT / "CMakeLists.txt"
 
@@ -547,6 +552,111 @@ def verify_piv_slot_storage() -> None:
             "PIV imported keys must use the logical-to-physical storage mapping")
 
 
+def verify_credential_ownership() -> None:
+    credential = text(CREDENTIAL)
+    assertion = text(GET_ASSERTION)
+    make_credential = text(MAKE_CREDENTIAL)
+    move = function_body(credential, "credential_move")
+    get_assertion = function_body(assertion, "cbor_get_assertion")
+    make = function_body(make_credential, "cbor_make_credential")
+
+    before(move, "credential_free(dst)", "*dst = *src",
+           "Credential move must release any previous destination ownership before transfer")
+    before(move, "*dst = *src", "memset(src, 0, sizeof(*src))",
+           "Credential move must clear the source immediately after transferring owned pointers")
+    require("creds[numberOfCredentials++] = creds[i]" not in get_assertion,
+            "GetAssertion compaction must not shallow-copy owned Credential values")
+    require("credsx[i] = creds[i]" not in get_assertion,
+            "GetNextAssertion transfer must not duplicate Credential ownership")
+    require(get_assertion.count("credential_move(&creds[numberOfCredentials], &creds[i])") == 2,
+            "both GetAssertion compaction branches must use explicit Credential move semantics")
+    require("credential_move(&credsx[i], &creds[i])" in get_assertion,
+            "GetNextAssertion retained credentials must receive ownership through credential_move")
+
+    for label, body in (("GetAssertion", get_assertion), ("MakeCredential", make)):
+        cleanup = body.find("err:")
+        require(cleanup >= 0, f"{label} must have one common cleanup boundary")
+        for ret in re.finditer(r"\breturn\b", body):
+            require(ret.start() > cleanup,
+                    f"{label} static request-owned storage must not bypass cleanup with an early return")
+
+    require("static PublicKeyCredentialDescriptor allowList" in get_assertion and
+            "static Credential creds" in get_assertion,
+            "GetAssertion large request-owned arrays must stay outside the worker task stack")
+    require("memset(allowList, 0, sizeof(allowList))" in get_assertion and
+            "memset(creds, 0, sizeof(creds))" in get_assertion,
+            "GetAssertion static owned arrays must be cleared at request boundaries")
+    require("static uint8_t aut_data[CTAP_MAX_CBOR_PAYLOAD]" in make and
+            "static uint8_t cred_id[MAX_CRED_ID_LENGTH]" in make and
+            "static uint8_t cbor_buf[1024]" in make,
+            "MakeCredential large request scratch must stay outside the worker task stack")
+    require(make.count("mbedtls_platform_zeroize(aut_data, sizeof(aut_data))") >= 2 and
+            make.count("mbedtls_platform_zeroize(cred_id, sizeof(cred_id))") >= 2 and
+            make.count("mbedtls_platform_zeroize(cbor_buf, sizeof(cbor_buf))") >= 2,
+            "MakeCredential static scratch must be zeroized on both entry and cleanup")
+
+
+def verify_allocation_boundaries() -> None:
+    cmake = text(CMAKE)
+    usb = text(USB)
+    hid = text(HID)
+    ccid = text(CCID)
+    ble = text(BLE)
+    credential = text(CREDENTIAL)
+
+    require("set(DEBUG_APDU 1)" not in cmake,
+            "product builds must not enable protocol payload dumps by default")
+
+    for label, source in (("USB core", usb), ("HID", hid), ("CCID", ccid), ("BLE", ble)):
+        require(re.search(r"\b(?:malloc|calloc|realloc)\s*\(", source) is None,
+                f"{label} runtime transport state must use deterministic static storage, not heap allocation")
+
+    require("CARD_INTERFACE_CAPACITY = 8" in text(USB_H),
+            "logical transport registration must have an explicit fixed capacity")
+    require("HID_TRANSPORT_CAPACITY = 2" in text(USB_H),
+            "HID transport storage capacity must be explicit")
+    require("CCID_TRANSPORT_CAPACITY = 2" in text(USB_H),
+            "CCID transport storage capacity must be explicit")
+    require("if (ITF_TOTAL >= CARD_INTERFACE_CAPACITY)" in function_body(usb, "card_register_interface"),
+            "extra transport registration must reject capacity exhaustion")
+    require("assert(ble_itf != ITF_INVALID)" in function_body(ble, "fido_ble_init"),
+            "BLE initialization must treat interface registration failure as a hard invariant")
+
+    fido_dir = ROOT / "pico-fido" / "src" / "fido"
+    allocations: list[tuple[Path, str]] = []
+    for path in sorted(fido_dir.glob("*.c")):
+        for match in re.finditer(r"\b(?:malloc|calloc|realloc)\s*\([^;]*", text(path)):
+            allocations.append((path, match.group(0)))
+    require(len(allocations) == 1,
+            f"common FIDO protocol code must have exactly one explicit owned allocation, found {allocations}")
+    allocation_path, allocation = allocations[0]
+    require(allocation_path == CREDENTIAL and "calloc(1, cred_id_len)" in allocation,
+            "the only common FIDO heap allocation must be Credential.id owned storage")
+
+    load = function_body(credential, "credential_load")
+    before(load, "cred->id.data = (uint8_t *) calloc(1, cred_id_len)",
+           "if (cred->id.data == NULL && cred_id_len != 0)",
+           "Credential.id allocation must be checked before copying into owned storage")
+    before(load, "if (cred->id.data == NULL && cred_id_len != 0)",
+           "memcpy(cred->id.data, cred_id, cred_id_len)",
+           "Credential.id must never be dereferenced before allocation success")
+
+
+def verify_protocol_buffer_bounds() -> None:
+    assertion = text(GET_ASSERTION)
+    ctap_h = text(CTAP_H)
+    authenticate = function_body(text(AUTHENTICATE), "cmd_authenticate")
+
+    require("uint8_t datax[CTAP_MAX_CBOR_PAYLOAD]" in assertion,
+            "GetNextAssertion must retain the complete negotiated CTAP CBOR payload, not MAX_MSG_SIZE")
+    require("#define CTAP_MAX_KH_SIZE         255" in ctap_h,
+            "U2F key-handle storage must match the one-byte wire length range")
+    require("uint8_t tmp_kh[CTAP_MAX_KH_SIZE]" in authenticate,
+            "U2F in-place credential verification must use a full wire-capacity scratch copy")
+    require("apdu.nc != CTAP_CHAL_SIZE + CTAP_APPID_SIZE + 1 + req->keyHandleLen" in authenticate,
+            "U2F Authenticate must require the actual APDU payload to exactly match keyHandleLen")
+
+
 def main() -> None:
     checks = (
         ("product SDK binding", verify_product_sdk_binding),
@@ -561,6 +671,9 @@ def main() -> None:
         ("BLE ownership", verify_ble_adapter),
         ("OTP HID ownership", verify_otp_hid_adapter),
         ("PIV slot storage", verify_piv_slot_storage),
+        ("Credential ownership", verify_credential_ownership),
+        ("allocation boundaries", verify_allocation_boundaries),
+        ("protocol buffer bounds", verify_protocol_buffer_bounds),
     )
     for label, check in checks:
         check()

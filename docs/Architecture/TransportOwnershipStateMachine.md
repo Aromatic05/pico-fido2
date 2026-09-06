@@ -63,6 +63,8 @@ Rules:
 - While a CCID worker owns its request snapshot, later CCID messages remain queued in the RX ring. The parser may not overwrite `ccid_request[itf].buffer` until the worker result has been consumed and the owner released.
 - BLE uses a capacity-one request queue as an ownership token. `rx.data` is not reset until the request token is consumed after worker/result/TX lifecycle completion.
 - OTP HID executes synchronously while holding the global owner and restores the prior `struct apdu` before release.
+- `Credential` contains owned CBOR/string pointers. It is move-only inside GetAssertion compaction and GetNextAssertion retention: `credential_move(dst, src)` releases `dst`, transfers the structure, and immediately zeros `src`. Raw structure assignment between owned credentials is forbidden.
+- Large MakeCredential/GetAssertion request scratch is static worker-owned storage rather than task-stack or transient heap storage. The global CBOR owner serializes access; every command exits through a common cleanup boundary that frees owned fields and zeroizes reusable scratch.
 
 ## 3. HID transaction state
 
@@ -270,6 +272,7 @@ Product `sdkconfig*.defaults` are separately checked by `tests/sdkconfig_contrac
 | HID worker snapshot cannot be overwritten by BUSY/CANCEL traffic | HID source contract + known-bad regression model |
 | CCID active request snapshot cannot be overwritten by a second frame | CCID request-context model + CCID source contract |
 | Worker exit cannot precede completion consumption | worker lifecycle model + arbiter/HID source contracts |
+| Credential compaction/retention has exactly one owner | Credential ownership model + `credential_move` source contract |
 | APDU transport-session isolation | APDU model + host protocol smoke |
 | GET RESPONSE storage is session-owned | APDU source contract |
 | PIV SELECT/power-cycle clears auth | PIV model |
@@ -279,6 +282,9 @@ Product `sdkconfig*.defaults` are separately checked by `tests/sdkconfig_contrac
 | Raw worker start/exit cannot bypass owner | arbiter source contract |
 | Cross-task button flags are atomic | button source contract |
 | HWRNG shared state is serialized | HWRNG source contract + TSan |
+| Transport state has deterministic fixed capacity and no runtime heap | allocation source contract |
+| Common FIDO transient state does not use unchecked heap | allocation source contract + GCC `-fanalyzer` |
+| Worker task frames remain bounded | `-Wframe-larger-than=8192` target-source host build |
 | Memory/UB safety on exercised host paths | ASAN + UBSAN |
 | Data-race safety on exercised host paths | ThreadSanitizer |
 | Product protocol behavior | `host_protocol_smoke.py` |
@@ -295,12 +301,13 @@ HID transaction model:    3 reachable states / 11 transitions
 HID response model:       4 reachable states / 5 transitions
 CCID request model:       5 reachable states / 9 transitions
 worker lifecycle model:   6 reachable states / 9 transitions
+Credential owner model:  13 reachable states / 54 transitions
 completion/flash model:    7 reachable states / 10 transitions
 PIV security model:        6 reachable states / 28 transitions
 YubiKey PID model:         7 interface combinations
 ```
 
-The model also injects known-bad designs and requires every one to violate an invariant. The current gate detects 14/14 negative designs, including early BLE RX clear, disconnect invalidation, release-before-copy, foreign shared-context mutation, unclaimed OTP access, foreign session reset, foreign worker switch, stale HID state after terminal BUSY, maintenance/completion deadlock, silent BLE event-queue loss, stale async HID headers on synchronous responses, CCID active-request snapshot overwrite, and worker exit before completion consumption.
+The model also injects known-bad designs and requires every one to violate an invariant. The current gate detects 15/15 negative designs, including early BLE RX clear, disconnect invalidation, release-before-copy, foreign shared-context mutation, unclaimed OTP access, foreign session reset, foreign worker switch, stale HID state after terminal BUSY, maintenance/completion deadlock, silent BLE event-queue loss, stale async HID headers on synchronous responses, CCID active-request snapshot overwrite, worker exit before completion consumption, and duplicated `Credential` ownership caused by shallow-copy compaction.
 
 ## 14. Required gate before another hardware image is considered
 
@@ -315,6 +322,8 @@ state-machine / ownership review complete
 -> git diff --check PASS
 -> normal host protocol smoke PASS
 -> HID/CCID contention stress PASS
+-> GCC -fanalyzer product build PASS
+-> product frame-size gate (< 8192 bytes per function frame) PASS
 -> ASAN + UBSAN smoke + contention + hard-power-loss durability PASS
 -> ThreadSanitizer smoke + contention + hard-power-loss durability PASS
 -> BLE frame sanitizer PASS
@@ -328,6 +337,6 @@ The complete software gate is intentionally exposed as one command so no individ
 ./tools/test_transport_ownership_gate.sh
 ```
 
-The normal FIDO host entry point (`tools/test_fido_host_container.sh`) also runs the explicit-state model, source ownership contracts, YubiKey profile contracts, sdkconfig contracts, protocol smoke, and transport contention before the existing FIDO pytest suite. The heavier sanitizer, durability, and ESP32 target build remain in the release/ownership gate above.
+The normal FIDO host entry point (`tools/test_fido_host_container.sh`) also runs the explicit-state model, source ownership contracts, YubiKey profile contracts, sdkconfig contracts, protocol smoke, and transport contention before the existing FIDO pytest suite. The release/ownership gate additionally runs GCC `-fanalyzer`, the worker-frame-size build, sanitizers, durability checks, and the ESP32 target build.
 
 Hardware HIL is deliberately outside this software proof boundary. A missing HIL result must remain `pending`; it is not permission to weaken any of the software gates above.

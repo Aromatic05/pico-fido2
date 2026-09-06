@@ -692,6 +692,58 @@ def explore_worker_lifecycle() -> tuple[int, int]:
     return len(seen), transitions
 
 
+@dataclass(frozen=True)
+class CredentialOwnershipState:
+    slots: tuple[int, int, int] = (1, 2, 0)
+
+
+def credential_ownership_invariants(s: CredentialOwnershipState) -> None:
+    owned = [resource for resource in s.slots if resource != 0]
+    assert len(owned) == len(set(owned)), "one credential resource has more than one owner"
+
+
+def credential_move_model(s: CredentialOwnershipState, dst: int, src: int) -> CredentialOwnershipState | None:
+    if dst == src or s.slots[src] == 0:
+        return None
+    slots = list(s.slots)
+    slots[dst] = slots[src]
+    slots[src] = 0
+    return CredentialOwnershipState(tuple(slots))
+
+
+def credential_free_model(s: CredentialOwnershipState, slot: int) -> CredentialOwnershipState | None:
+    if s.slots[slot] == 0:
+        return None
+    slots = list(s.slots)
+    slots[slot] = 0
+    return CredentialOwnershipState(tuple(slots))
+
+
+def explore_credential_ownership() -> tuple[int, int]:
+    initial = CredentialOwnershipState()
+    queue: deque[CredentialOwnershipState] = deque([initial])
+    seen = {initial}
+    transitions = 0
+    while queue:
+        state = queue.popleft()
+        credential_ownership_invariants(state)
+        candidates: list[CredentialOwnershipState | None] = []
+        for src in range(3):
+            for dst in range(3):
+                candidates.append(credential_move_model(state, dst, src))
+        for slot in range(3):
+            candidates.append(credential_free_model(state, slot))
+        for nxt in candidates:
+            if nxt is None:
+                continue
+            transitions += 1
+            credential_ownership_invariants(nxt)
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return len(seen), transitions
+
+
 class CompletionPhase(Enum):
     IDLE = auto()
     RUNNING = auto()
@@ -1002,6 +1054,16 @@ def verify_known_bad_models_are_detected() -> int:
     else:
         raise AssertionError("model allowed worker exit before completion ACK consumption")
 
+    # Regression 15: shallow-copying an owned Credential during compaction
+    # leaves two slots pointing at the same owned fields.
+    broken_credential = CredentialOwnershipState((1, 1, 0))
+    try:
+        credential_ownership_invariants(broken_credential)
+    except AssertionError:
+        detected += 1
+    else:
+        raise AssertionError("model failed to detect duplicated Credential ownership")
+
     return detected
 
 
@@ -1012,6 +1074,7 @@ def main() -> None:
     hid_response_states, hid_response_transitions = explore_hid_response_context()
     ccid_request_states, ccid_request_transitions = explore_ccid_request_context()
     worker_states, worker_transitions = explore_worker_lifecycle()
+    credential_states, credential_transitions = explore_credential_ownership()
     completion_states, completion_transitions = explore_completion_liveness()
     piv_states, piv_transitions = explore_piv()
     pids = verify_yubikey_pid_mapping()
@@ -1033,12 +1096,16 @@ def main() -> None:
         f"({worker_states} states, {worker_transitions} transitions)"
     )
     print(
+        f"Credential ownership model: PASS "
+        f"({credential_states} states, {credential_transitions} transitions)"
+    )
+    print(
         f"completion/flash liveness model: PASS "
         f"({completion_states} states, {completion_transitions} transitions)"
     )
     print(f"PIV security model: PASS ({piv_states} states, {piv_transitions} transitions)")
     print(f"YubiKey USB PID model: PASS ({pids} interface combinations)")
-    print(f"known-bad regression models detected: PASS ({regressions}/14)")
+    print(f"known-bad regression models detected: PASS ({regressions}/15)")
 
 
 if __name__ == "__main__":
