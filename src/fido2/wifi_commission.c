@@ -12,10 +12,12 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/constant_time.h"
 
 #include "fido/management.h"
 #include "fido/version.h"
@@ -29,6 +31,7 @@
 static const char *TAG = "fido_wifi";
 static httpd_handle_t http_server;
 static char softap_ssid[33];
+static char csrf_token[33];
 static bool commissioning_started;
 static bool restart_requested;
 static TickType_t last_activity_tick;
@@ -71,6 +74,15 @@ static esp_err_t management_transport_error(httpd_req_t *req, esp_err_t err) {
     return json_response(req, "500 Internal Server Error", "{\"error\":\"management failure\"}");
 }
 
+static bool csrf_valid(httpd_req_t *req) {
+    char header[sizeof(csrf_token)];
+    if (httpd_req_get_hdr_value_str(req, "X-Pico-CSRF", header, sizeof(header)) != ESP_OK) {
+        return false;
+    }
+    return strlen(header) == sizeof(csrf_token) - 1 &&
+           mbedtls_ct_memcmp(header, csrf_token, sizeof(csrf_token) - 1) == 0;
+}
+
 static const char index_html[] =
     "<!doctype html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -89,9 +101,9 @@ static const char index_html[] =
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
     "lockRow.style.display=c.locked?'block':'none';msgBox.textContent=c.locked?'Configuration is locked; the existing 16-byte lock code is required to save.':'Configuration is unlocked.'}"
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
-    "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});const j=await r.json();"
+    "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
     "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.';await load()}"
-    "async function reboot(){const r=await fetch('/api/reboot',{method:'POST'});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
+    "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
 static esp_err_t index_get(httpd_req_t *req) {
@@ -136,12 +148,12 @@ static esp_err_t config_get(httpd_req_t *req) {
         return management_transport_error(req, err);
     }
 
-    char body[192];
+    char body[240];
     snprintf(body, sizeof(body),
-             "{\"supported\":%u,\"enabled\":%u,\"configured\":%s,\"locked\":%s,\"restartRequired\":true}",
+             "{\"supported\":%u,\"enabled\":%u,\"configured\":%s,\"locked\":%s,\"restartRequired\":true,\"csrf\":\"%s\"}",
              state.supported, state.enabled,
              state.configured ? "true" : "false",
-             state.locked ? "true" : "false");
+             state.locked ? "true" : "false", csrf_token);
     return json_response(req, "200 OK", body);
 }
 
@@ -206,6 +218,9 @@ static bool parse_unlock(const char *body, uint8_t unlock[MAN_CONFIG_LOCK_LEN],
 
 static esp_err_t config_post(httpd_req_t *req) {
     touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
     char body[128];
     if (read_form_body(req, body, sizeof(body)) != ESP_OK) {
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid request body\"}");
@@ -241,6 +256,9 @@ static esp_err_t config_post(httpd_req_t *req) {
 
 static esp_err_t reboot_post(httpd_req_t *req) {
     touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
     esp_err_t err = json_response(req, "202 Accepted", "{\"ok\":true}");
     if (err == ESP_OK) {
         __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
@@ -318,6 +336,12 @@ static void fido_wifi_start(void) {
     }
     snprintf(softap_ssid, sizeof(softap_ssid), "%s-%02X%02X",
              CONFIG_PICO_FIDO2_WIFI_SSID_PREFIX, mac[4], mac[5]);
+
+    uint8_t csrf_random[16];
+    esp_fill_random(csrf_random, sizeof(csrf_random));
+    for (size_t i = 0; i < sizeof(csrf_random); ++i) {
+        snprintf(csrf_token + i * 2, 3, "%02x", csrf_random[i]);
+    }
 
     err = init_network_stack();
     if (err != ESP_OK) {
