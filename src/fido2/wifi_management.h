@@ -29,6 +29,7 @@ esp_err_t fido_wifi_management_set_lock(
     uint16_t *status_word,
     fido_wifi_management_state_t *state);
 esp_err_t fido_wifi_management_allow_ble_pairing(void);
+esp_err_t fido_wifi_management_reset_ble_bonds(void);
 void fido_wifi_management_task(void);
 
 #endif

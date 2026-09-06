@@ -38,6 +38,7 @@
 #define FIDO_BLE_FRAGMENT_TIMEOUT_MS  1500
 #define FIDO_BLE_PAIRING_NVS_NAMESPACE "pico_ble"
 #define FIDO_BLE_PAIRING_NVS_KEY       "pair_grant"
+#define FIDO_BLE_BOND_RESET_NVS_KEY    "bond_reset"
 
 static const char *TAG = "fido_ble";
 
@@ -143,50 +144,83 @@ static bool fido_ble_peer_is_bonded(const ble_addr_t *peer_id_addr) {
     return false;
 }
 
-static bool fido_ble_consume_pairing_window_grant(void) {
+static bool fido_ble_consume_action(const char *key, const char *label) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(FIDO_BLE_PAIRING_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pairing grant NVS open failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "%s NVS open failed: %s", label, esp_err_to_name(err));
         return false;
     }
 
     uint8_t grant = 0;
-    err = nvs_get_u8(handle, FIDO_BLE_PAIRING_NVS_KEY, &grant);
+    err = nvs_get_u8(handle, key, &grant);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         nvs_close(handle);
         return false;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pairing grant NVS read failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "%s NVS read failed: %s", label, esp_err_to_name(err));
         nvs_close(handle);
         return false;
     }
 
-    err = nvs_erase_key(handle, FIDO_BLE_PAIRING_NVS_KEY);
+    err = nvs_erase_key(handle, key);
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
     nvs_close(handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pairing grant consume failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "%s consume failed: %s", label, esp_err_to_name(err));
         return false;
     }
     return grant == 1;
 }
 
-esp_err_t fido_ble_schedule_pairing_window(void) {
+static esp_err_t fido_ble_schedule_actions(bool pairing, bool reset_bonds) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(FIDO_BLE_PAIRING_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_u8(handle, FIDO_BLE_PAIRING_NVS_KEY, 1);
+    if (pairing) {
+        err = nvs_set_u8(handle, FIDO_BLE_PAIRING_NVS_KEY, 1);
+    }
+    if (err == ESP_OK && reset_bonds) {
+        err = nvs_set_u8(handle, FIDO_BLE_BOND_RESET_NVS_KEY, 1);
+    }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
     nvs_close(handle);
     return err;
+}
+
+esp_err_t fido_ble_schedule_pairing_window(void) {
+    return fido_ble_schedule_actions(true, false);
+}
+
+esp_err_t fido_ble_schedule_bond_reset(void) {
+    return fido_ble_schedule_actions(true, true);
+}
+
+static bool fido_ble_clear_all_bonds(void) {
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int peer_count = 0;
+    int rc = ble_store_util_bonded_peers(peers, &peer_count,
+                                         CONFIG_BT_NIMBLE_MAX_BONDS);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "bond enumeration failed: %d", rc);
+        return false;
+    }
+    for (int i = 0; i < peer_count; ++i) {
+        rc = ble_store_util_delete_peer(&peers[i]);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "bond delete failed at index %d: %d", i, rc);
+            return false;
+        }
+    }
+    ESP_LOGI(TAG, "cleared %d persistent BLE bond(s)", peer_count);
+    return true;
 }
 
 static void fido_ble_queue_event(fido_ble_event_t event) {
@@ -834,7 +868,15 @@ void fido_ble_init(void) {
     assert(ble_gatts_count_cfg(fido_ble_services) == 0);
     assert(ble_gatts_add_svcs(fido_ble_services) == 0);
     ble_store_config_init();
-    bool pairing_grant = fido_ble_consume_pairing_window_grant();
+    bool reset_bonds = fido_ble_consume_action(
+        FIDO_BLE_BOND_RESET_NVS_KEY, "bond reset grant");
+    bool reset_ok = !reset_bonds || fido_ble_clear_all_bonds();
+    bool pairing_grant = fido_ble_consume_action(
+        FIDO_BLE_PAIRING_NVS_KEY, "pairing grant");
+    if (!reset_ok) {
+        pairing_grant = false;
+        ESP_LOGE(TAG, "bond reset incomplete; fresh pairing remains disabled");
+    }
     fido_ble_pairing_policy_init(
         &pairing_policy,
         CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC * 1000U,

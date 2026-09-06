@@ -118,7 +118,7 @@ static const char index_html[] =
     "<label>New lock code (32 hex)<br><input id=newLock maxlength=32 autocomplete=off></label>"
     "<label>Confirm new lock code<br><input id=confirmLock maxlength=32 autocomplete=off></label>"
     "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
-    "<div class=card><h2>Maintenance actions</h2><button onclick=pairBle()>Allow BLE pairing</button><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
+    "<div class=card><h2>Maintenance actions</h2><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
     "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
@@ -128,6 +128,7 @@ static const char index_html[] =
     "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}unlockInput.value='';await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
     "async function changeLock(clear){const p=new URLSearchParams();if(cfg.locked)p.set('unlock',unlockInput.value.trim());if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}unlockInput.value='';newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
     "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
+    "async function resetBle(){if(!confirm('Revoke every persisted BLE bond? Existing paired phones/computers will lose trust. One new pairing window will open after restart.'))return;const r=await fetch('/api/ble/bonds/reset',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE bond reset scheduled; restarting into one fresh-pairing window.':(j.error||'BLE bond reset failed.')}"
     "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
@@ -394,6 +395,30 @@ static esp_err_t ble_pairing_post(httpd_req_t *req) {
     return err;
 }
 
+static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
+    touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
+    if (!consume_physical_presence()) {
+        return json_response(req, "428 Precondition Required",
+                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
+    }
+    esp_err_t err = fido_wifi_management_reset_ble_bonds();
+    if (err != ESP_OK) {
+        return management_transport_error(req, err);
+    }
+    char response[80];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"pairingWindowSec\":%u,\"resetBonds\":true}",
+             (unsigned)CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
+    err = json_response(req, "202 Accepted", response);
+    if (err == ESP_OK) {
+        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    }
+    return err;
+}
+
 static esp_err_t start_http_server(void) {
     if (http_server != NULL) {
         return ESP_OK;
@@ -401,7 +426,7 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 7;
+    config.max_uri_handlers = 8;
     config.backlog_conn = 1;
     esp_err_t err = httpd_start(&http_server, &config);
     if (err != ESP_OK) {
@@ -415,6 +440,7 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
         {.uri = "/api/config/lock", .method = HTTP_POST, .handler = config_lock_post},
         {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
+        {.uri = "/api/ble/bonds/reset", .method = HTTP_POST, .handler = ble_bond_reset_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {

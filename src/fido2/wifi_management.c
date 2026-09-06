@@ -22,6 +22,7 @@ typedef enum {
     WIFI_MANAGEMENT_SET_ENABLED,
     WIFI_MANAGEMENT_SET_LOCK,
     WIFI_MANAGEMENT_ALLOW_BLE_PAIRING,
+    WIFI_MANAGEMENT_RESET_BLE_BONDS,
 } wifi_management_operation_t;
 
 typedef struct {
@@ -203,6 +204,15 @@ esp_err_t fido_wifi_management_allow_ble_pairing(void) {
     return transact(&request, &response);
 }
 
+esp_err_t fido_wifi_management_reset_ble_bonds(void) {
+    wifi_management_request_t request = {
+        .id = __atomic_add_fetch(&request_id, 1, __ATOMIC_RELAXED),
+        .operation = WIFI_MANAGEMENT_RESET_BLE_BONDS,
+    };
+    wifi_management_response_t response = {0};
+    return transact(&request, &response);
+}
+
 void fido_wifi_management_task(void) {
     if (request_queue == NULL || response_queue == NULL) {
         return;
@@ -241,6 +251,13 @@ void fido_wifi_management_task(void) {
         case WIFI_MANAGEMENT_ALLOW_BLE_PAIRING:
 #if CONFIG_PICO_FIDO2_BLE
             response.result = fido_ble_schedule_pairing_window();
+#else
+            response.result = ESP_ERR_NOT_SUPPORTED;
+#endif
+            break;
+        case WIFI_MANAGEMENT_RESET_BLE_BONDS:
+#if CONFIG_PICO_FIDO2_BLE
+            response.result = fido_ble_schedule_bond_reset();
 #else
             response.result = ESP_ERR_NOT_SUPPORTED;
 #endif

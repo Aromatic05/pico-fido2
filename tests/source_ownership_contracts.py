@@ -186,6 +186,7 @@ def verify_wifi_commissioning() -> None:
     config_post = function_body(source, "config_post")
     lock_post = function_body(source, "config_lock_post")
     pairing_post = function_body(source, "ble_pairing_post")
+    bond_reset_post = function_body(source, "ble_bond_reset_post")
     reboot_post = function_body(source, "reboot_post")
     grant_presence = function_body(source, "grant_physical_presence")
     consume_presence = function_body(source, "consume_physical_presence")
@@ -222,6 +223,9 @@ def verify_wifi_commissioning() -> None:
             "configuration-lock changes must consume one physical BOOT confirmation")
     require("csrf_valid(req)" in lock_post,
             "configuration-lock changes must require the commissioning CSRF token")
+    require("consume_physical_presence()" in bond_reset_post and
+            "csrf_valid(req)" in bond_reset_post,
+            "BLE bond reset must require both physical confirmation and the commissioning CSRF token")
     require("consume_physical_presence()" not in reboot_post,
             "non-persistent maintenance reboot must not consume the mutation confirmation")
     for label, body in (("grant", grant_presence), ("consume", consume_presence)):
@@ -230,7 +234,8 @@ def verify_wifi_commissioning() -> None:
                 f"Wi-Fi physical presence {label} must serialize core0 and HTTP task access")
     require("428 Precondition Required" in config_post and
             "428 Precondition Required" in pairing_post and
-            "428 Precondition Required" in lock_post,
+            "428 Precondition Required" in lock_post and
+            "428 Precondition Required" in bond_reset_post,
             "mutating maintenance APIs must fail closed when physical confirmation is absent")
     require("mbedtls_platform_zeroize(unlock" in config_post,
             "USB configuration unlock material must be zeroized after use")
@@ -254,6 +259,11 @@ def verify_wifi_commissioning() -> None:
            "configuration-lock writes must claim the global maintenance owner first")
     before(management_task, "write_lock(&request)", "do_flash()",
            "configuration-lock writes must use the durable core0 flash barrier")
+    require("WIFI_MANAGEMENT_RESET_BLE_BONDS" in management_task and
+            "fido_ble_schedule_bond_reset()" in management_task,
+            "BLE bond reset must be scheduled through the core0 management task")
+    before(management_task, "card_try_claim_maintenance()", "fido_ble_schedule_bond_reset()",
+           "BLE bond reset scheduling must claim the global maintenance owner first")
     for assignment in (
         "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
         "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12",
@@ -607,10 +617,14 @@ def verify_ble_pairing_security() -> None:
     gap = function_body(source, "fido_ble_gap_event")
     access = function_body(source, "fido_ble_access")
     init = function_body(source, "fido_ble_init")
+    schedule_actions = function_body(source, "fido_ble_schedule_actions")
     schedule = function_body(source, "fido_ble_schedule_pairing_window")
+    schedule_reset = function_body(source, "fido_ble_schedule_bond_reset")
+    clear_bonds = function_body(source, "fido_ble_clear_all_bonds")
     wifi_management = text(WIFI_MANAGEMENT)
     wifi_task = function_body(wifi_management, "fido_wifi_management_task")
     wifi_allow = function_body(wifi_management, "fido_wifi_management_allow_ble_pairing")
+    wifi_reset = function_body(wifi_management, "fido_wifi_management_reset_ble_bonds")
     defaults = text(BLE_DEFAULTS)
 
     require("CONFIG_BT_NIMBLE_NVS_PERSIST=y" in defaults,
@@ -634,14 +648,29 @@ def verify_ble_pairing_security() -> None:
             "unauthorized bond deletion must occur after NimBLE persistence, not in pairing-complete callback")
     require("ble_gap_terminate" in gap[enc_pos:],
             "an unauthorized fresh bond must be disconnected after its persisted record is removed")
-    before(init, "ble_store_config_init()", "fido_ble_consume_pairing_window_grant()",
-           "persistent bonds must be restored before the one-time pairing grant is consumed")
-    before(init, "fido_ble_consume_pairing_window_grant()", "nimble_port_freertos_init",
+    before(init, "ble_store_config_init()", "FIDO_BLE_BOND_RESET_NVS_KEY",
+           "persistent bonds must be restored before a scheduled reset is consumed")
+    before(init, "FIDO_BLE_BOND_RESET_NVS_KEY", "fido_ble_clear_all_bonds()",
+           "the reset flag must be consumed before deleting persisted bonds")
+    before(init, "fido_ble_clear_all_bonds()", "FIDO_BLE_PAIRING_NVS_KEY",
+           "old bonds must be revoked before the fresh-pairing grant is consumed")
+    before(init, "FIDO_BLE_PAIRING_NVS_KEY", "nimble_port_freertos_init",
            "the one-time pairing grant must be consumed before BLE begins accepting connections")
-    require("nvs_set_u8" in schedule and "nvs_commit" in schedule,
-            "maintenance pairing grants must be durable before reboot")
+    require("ble_store_util_bonded_peers" in clear_bonds and
+            "ble_store_util_delete_peer" in clear_bonds,
+            "bond reset must enumerate the persistent bond store and delete each peer")
+    require("if (!reset_ok)" in init and "pairing_grant = false" in init,
+            "an incomplete bond reset must fail closed and suppress fresh pairing")
+    require("nvs_set_u8" in schedule_actions and "nvs_commit" in schedule_actions,
+            "maintenance BLE actions must be durable before reboot")
+    require("fido_ble_schedule_actions(true, false)" in schedule,
+            "normal pairing grant must schedule pairing without bond reset")
+    require("fido_ble_schedule_actions(true, true)" in schedule_reset,
+            "bond reset must atomically schedule both revocation and one fresh-pairing window")
     require("WIFI_MANAGEMENT_ALLOW_BLE_PAIRING" in wifi_allow,
             "the HTTP pairing action must enter the serialized core0 management queue")
+    require("WIFI_MANAGEMENT_RESET_BLE_BONDS" in wifi_reset,
+            "the HTTP bond reset action must enter the serialized core0 management queue")
     before(wifi_task, "card_try_claim_maintenance()", "fido_ble_schedule_pairing_window()",
            "pairing-grant persistence must execute under the global maintenance owner")
 
