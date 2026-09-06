@@ -17,10 +17,28 @@ import secrets
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 MAX_SECURITY_VERSION = 16
+PROVISION_KEY_BLOCKS = (0, 1, 3, 4)
+PROVISION_FIELDS = (
+    "SECURE_BOOT_EN",
+    "SPI_BOOT_CRYPT_CNT",
+    "DIS_DOWNLOAD_MODE",
+    "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE",
+    "SECURE_VERSION",
+    "MAC",
+    "KEY_PURPOSE_0",
+    "KEY_PURPOSE_1",
+    "KEY_PURPOSE_3",
+    "KEY_PURPOSE_4",
+    "BLOCK_KEY0",
+    "BLOCK_KEY1",
+    "BLOCK_KEY3",
+    "BLOCK_KEY4",
+)
 
 LAYOUT = [
     {
@@ -59,6 +77,28 @@ FILES = {
     "mkek": "mkek.bin",
     "device_key": "device_key_secp256k1.bin",
 }
+
+
+@dataclass(frozen=True)
+class KeyBlockState:
+    purpose: str
+    purpose_writeable: bool
+    readable: bool
+    writeable: bool
+    value: bytes | None
+    raw_value: int
+
+
+@dataclass(frozen=True)
+class ProvisioningDeviceState:
+    mac: str
+    secure_boot: bool
+    flash_encryption_raw: int
+    security_version_raw: int
+    security_floor: int
+    download_mode_enabled: bool
+    usb_download_mode_enabled: bool
+    keys: dict[int, KeyBlockState]
 
 
 def sha256(path: Path) -> str:
@@ -153,6 +193,213 @@ def read_security_state(
         raise SystemExit(f"unexpected SECURE_VERSION width: {entry.get('bit_len')}")
     security_version_floor(raw)
     return raw, writeable, mac
+
+
+def read_efuse_json(
+    fields: tuple[str, ...], *, port: str | None = None, virt_file: Path | None = None
+) -> dict[str, object]:
+    output = capture(espefuse_base(port=port, virt_file=virt_file) + [
+        "summary", *fields, "--format", "json"
+    ])
+    start = output.find("{")
+    if start < 0:
+        raise SystemExit("espefuse JSON was not found")
+    try:
+        value = json.loads(output[start:])
+    except json.JSONDecodeError as exc:
+        raise SystemExit("invalid espefuse JSON") from exc
+    if not isinstance(value, dict):
+        raise SystemExit("unexpected espefuse JSON root")
+    return value
+
+
+def _efuse_entry(data: dict[str, object], name: str) -> dict[str, object]:
+    value = data.get(name)
+    if not isinstance(value, dict):
+        raise SystemExit(f"missing eFuse field: {name}")
+    return value
+
+
+def _efuse_bool(data: dict[str, object], name: str) -> bool:
+    value = _efuse_entry(data, name).get("value")
+    if not isinstance(value, bool):
+        raise SystemExit(f"invalid boolean eFuse field: {name}")
+    return value
+
+
+def _efuse_raw(data: dict[str, object], name: str) -> int:
+    try:
+        return int(str(_efuse_entry(data, name)["raw_value"]), 0)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid raw eFuse field: {name}") from exc
+
+
+def _efuse_bytes(entry: dict[str, object], name: str) -> bytes | None:
+    if entry.get("readable") is not True:
+        return None
+    value = entry.get("value")
+    if not isinstance(value, str):
+        raise SystemExit(f"invalid readable key block: {name}")
+    compact = "".join(value.split())
+    if len(compact) != 64:
+        raise SystemExit(f"unexpected readable key length: {name}")
+    try:
+        return bytes.fromhex(compact)
+    except ValueError as exc:
+        raise SystemExit(f"invalid readable key block: {name}") from exc
+
+
+def parse_provisioning_state(data: dict[str, object]) -> ProvisioningDeviceState:
+    sec = _efuse_entry(data, "SECURE_VERSION")
+    if sec.get("bit_len") != MAX_SECURITY_VERSION:
+        raise SystemExit(f"unexpected SECURE_VERSION width: {sec.get('bit_len')}")
+    sec_raw = _efuse_raw(data, "SECURE_VERSION")
+    floor = security_version_floor(sec_raw)
+    crypt_raw = _efuse_raw(data, "SPI_BOOT_CRYPT_CNT")
+    if not 0 <= crypt_raw <= 0x7:
+        raise SystemExit(f"invalid SPI_BOOT_CRYPT_CNT raw value: 0x{crypt_raw:x}")
+
+    try:
+        mac = normalize_mac(str(_efuse_entry(data, "MAC")["value"]))
+    except (KeyError, ValueError) as exc:
+        raise SystemExit("invalid factory MAC") from exc
+
+    keys: dict[int, KeyBlockState] = {}
+    for index in PROVISION_KEY_BLOCKS:
+        purpose_name = f"KEY_PURPOSE_{index}"
+        block_name = f"BLOCK_KEY{index}"
+        purpose = _efuse_entry(data, purpose_name)
+        block = _efuse_entry(data, block_name)
+        keys[index] = KeyBlockState(
+            purpose=str(purpose.get("value", "")),
+            purpose_writeable=bool(purpose.get("writeable")),
+            readable=bool(block.get("readable")),
+            writeable=bool(block.get("writeable")),
+            value=_efuse_bytes(block, block_name),
+            raw_value=_efuse_raw(data, block_name),
+        )
+
+    return ProvisioningDeviceState(
+        mac=mac,
+        secure_boot=_efuse_bool(data, "SECURE_BOOT_EN"),
+        flash_encryption_raw=crypt_raw,
+        security_version_raw=sec_raw,
+        security_floor=floor,
+        download_mode_enabled=not _efuse_bool(data, "DIS_DOWNLOAD_MODE"),
+        usb_download_mode_enabled=not _efuse_bool(data, "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE"),
+        keys=keys,
+    )
+
+
+def read_provisioning_state(
+    *, port: str | None = None, virt_file: Path | None = None
+) -> ProvisioningDeviceState:
+    return parse_provisioning_state(
+        read_efuse_json(PROVISION_FIELDS, port=port, virt_file=virt_file)
+    )
+
+
+def validate_pre_enable_state(state: ProvisioningDeviceState) -> None:
+    if state.secure_boot:
+        raise SystemExit("Secure Boot is already enabled")
+    if state.flash_encryption_raw != 0:
+        raise SystemExit(
+            f"Flash Encryption enable count is already nonzero: 0x{state.flash_encryption_raw:x}"
+        )
+    if state.security_floor != 0:
+        raise SystemExit(
+            f"SECURE_VERSION must remain 0 during initial provisioning, found {state.security_floor}"
+        )
+    if not state.download_mode_enabled:
+        raise SystemExit("ROM download mode is already disabled")
+    if not state.usb_download_mode_enabled:
+        raise SystemExit("USB Serial/JTAG ROM download mode is already disabled")
+
+
+def validate_blank_provisioning_state(state: ProvisioningDeviceState) -> None:
+    validate_pre_enable_state(state)
+    for index in PROVISION_KEY_BLOCKS:
+        key = state.keys[index]
+        if key.purpose != "USER" or not key.purpose_writeable:
+            raise SystemExit(f"KEY{index} purpose is not blank/writeable")
+        if not key.readable or not key.writeable:
+            raise SystemExit(f"KEY{index} block is not blank/readable/writeable")
+        if key.raw_value != 0 or key.value != bytes(32):
+            raise SystemExit(f"KEY{index} block is not empty")
+
+
+def expected_provisioning_material(manifest_path: Path) -> dict[int, tuple[str, bool, bytes | None]]:
+    manifest = json.loads(manifest_path.read_text())
+    root = manifest_path.parent
+    if manifest.get("chip") != "esp32s3" or manifest.get("layout") != LAYOUT:
+        raise SystemExit("manifest chip/layout mismatch")
+    digest = (root / FILES["secure_boot_digest"]).read_bytes()
+    mkek = (root / FILES["mkek"]).read_bytes()
+    device_key = (root / FILES["device_key"]).read_bytes()
+    if len(digest) != 32 or len(mkek) != 32 or len(device_key) != 32:
+        raise SystemExit("unexpected provisioning key length")
+    return {
+        0: ("SECURE_BOOT_DIGEST0", True, digest),
+        1: ("XTS_AES_128_KEY", False, None),
+        3: ("USER", True, mkek),
+        4: ("USER", True, device_key),
+    }
+
+
+def validate_provisioned_device_state(
+    state: ProvisioningDeviceState,
+    expected: dict[int, tuple[str, bool, bytes | None]],
+) -> None:
+    validate_pre_enable_state(state)
+    for index in PROVISION_KEY_BLOCKS:
+        key = state.keys[index]
+        purpose, readable, value = expected[index]
+        if key.purpose != purpose:
+            raise SystemExit(f"KEY{index} purpose mismatch: {key.purpose!r} != {purpose!r}")
+        if key.purpose_writeable:
+            raise SystemExit(f"KEY{index} purpose is not write-protected")
+        if key.writeable:
+            raise SystemExit(f"KEY{index} block is not write-protected")
+        if key.readable != readable:
+            raise SystemExit(
+                f"KEY{index} readability mismatch: {key.readable} != {readable}"
+            )
+        if readable and key.value != value:
+            raise SystemExit(f"KEY{index} readable key material does not match provisioning manifest")
+
+
+def provisioning_state_command(args: argparse.Namespace, *, provisioned: bool) -> None:
+    if args.port is not None and args.expect_mac is None:
+        raise SystemExit("real-device provisioning inspection requires --expect-mac")
+    state = read_provisioning_state(port=args.port, virt_file=args.virt_file)
+    if args.expect_mac is not None and args.expect_mac != state.mac:
+        raise SystemExit(f"expected MAC {args.expect_mac}, device reports {state.mac}")
+
+    if provisioned:
+        verify_manifest(args.manifest, quiet=True)
+        expected = expected_provisioning_material(args.manifest)
+        validate_provisioned_device_state(state, expected)
+        phase = "provisioned-key verification"
+    else:
+        validate_blank_provisioning_state(state)
+        phase = "blank-device preflight"
+
+    source = str(args.virt_file) if args.virt_file is not None else args.port
+    print(f"ESP32-S3 {phase}: PASS")
+    print(f"source:              {source}")
+    print(f"device MAC:          {state.mac}")
+    print("Secure Boot:         disabled")
+    print("Flash Encryption:    disabled")
+    print("SECURE_VERSION:      0")
+    print("ROM recovery:        enabled")
+    if provisioned:
+        print("KEY0/1/3/4 layout:   PASS")
+        print("readable key checks: PASS (KEY0/KEY3/KEY4)")
+        print("KEY1 read protect:   PASS")
+    else:
+        print("KEY0/1/3/4 empty:    PASS")
+        print("key blocks writeable: PASS")
+    print("device write:        no")
 
 
 def security_version_command(args: argparse.Namespace) -> None:
@@ -355,7 +602,7 @@ def print_plan() -> None:
     print("Only 'security-version --apply' can burn SECURE_VERSION; real hardware also requires current-floor and MAC guards.")
 
 
-def verify_manifest(path: Path) -> None:
+def verify_manifest(path: Path, *, quiet: bool = False) -> None:
     manifest = json.loads(path.read_text())
     root = path.parent
     if manifest.get("chip") != "esp32s3" or manifest.get("layout") != LAYOUT:
@@ -370,7 +617,8 @@ def verify_manifest(path: Path) -> None:
         raise SystemExit("invalid secp256k1 private scalar")
     if (root / FILES["secure_boot_digest"]).read_bytes().hex() != manifest["secure_boot_digest_hex"]:
         raise SystemExit("secure boot digest mismatch")
-    print(f"manifest: PASS ({path})")
+    if not quiet:
+        print(f"manifest: PASS ({path})")
 
 
 def main() -> None:
@@ -381,6 +629,17 @@ def main() -> None:
     gen.add_argument("--output-dir", type=Path, default=Path("build-provisioning"))
     verify = sub.add_parser("verify", help="verify a generated manifest and artifacts")
     verify.add_argument("manifest", type=Path)
+    preflight = sub.add_parser("preflight", help="read-only blank-device provisioning preflight")
+    preflight_source = preflight.add_mutually_exclusive_group(required=True)
+    preflight_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
+    preflight_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
+    preflight.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    verify_device = sub.add_parser("verify-device", help="read-only verification after KEY0/1/3/4 provisioning")
+    verify_source = verify_device.add_mutually_exclusive_group(required=True)
+    verify_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
+    verify_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
+    verify_device.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    verify_device.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
     secver = sub.add_parser("security-version", help="plan or apply the anti-rollback SECURE_VERSION floor")
     source = secver.add_mutually_exclusive_group(required=True)
     source.add_argument("--current", type=int, help="offline current floor (0..16)")
@@ -405,6 +664,10 @@ def main() -> None:
         print(f"secure boot digest: {json.loads(manifest.read_text())['secure_boot_digest_hex']}")
     elif args.command == "verify":
         verify_manifest(args.manifest)
+    elif args.command == "preflight":
+        provisioning_state_command(args, provisioned=False)
+    elif args.command == "verify-device":
+        provisioning_state_command(args, provisioned=True)
     else:
         security_version_command(args)
 

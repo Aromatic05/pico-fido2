@@ -283,6 +283,25 @@ KEY5 = FREE
 ./tools/esp32s3_provision.py verify build-provisioning/manifest.json
 ```
 
+Before any hardware key provisioning, run the read-only blank-device preflight and bind the inspection to the exact factory MAC. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
+
+```bash
+./tools/esp32s3_provision.py preflight \
+    --port /dev/ttyACM0 \
+    --expect-mac 12:34:56:78:9a:bc
+```
+
+After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabling Flash Encryption or Secure Boot, the separate read-only verification checks the key purposes, key-block write protection, KEY1 read protection, and exact readable KEY0/KEY3/KEY4 material against the host manifest:
+
+```bash
+./tools/esp32s3_provision.py verify-device \
+    --port /dev/ttyACM0 \
+    --expect-mac 12:34:56:78:9a:bc \
+    --manifest build-provisioning/manifest.json
+```
+
+Neither `preflight` nor `verify-device` has an apply/write option. The current tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning also requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+
 For experiments the plan uses `SPI_BOOT_CRYPT_CNT=0b001` and leaves JTAG/ROM download available. Production hardening is intentionally a separate irreversible step.
 
 The pre-provisioned firmware contract is fail-closed: with `CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y`, blank or incorrectly purposed KEY3/KEY4 cause startup to return `PICOKEY_ERR_PROVISIONING_REQUIRED` without changing eFuses. The QEMU gate verifies blank/fail-closed, virtual provisioning, and provisioned/read-only startup states:
@@ -303,7 +322,7 @@ A fully host-prepared 4 MiB security image can then be built without any connect
 
 The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2, requires pre-provisioned KEY3/KEY4, sets Flash Encryption to `REQUIRE_ALREADY_ENABLED`, XTS-encrypts the bootloader, partition table, application and initially erased `part0`, and decrypts every region again for byte-for-byte verification. The standalone verifier independently checks bundle/provisioning manifest hashes, decrypts all regions, verifies plaintext hashes, verifies the bootloader/application RSA-PSS signatures, and checks that initial `part0` decrypts to erased flash. Neither tool contains a device flash or eFuse write action.
 
-The intended first hardware boot order is therefore: verify the untouched board baseline, provision KEY0/KEY1/KEY3/KEY4, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot.
+The intended first hardware boot order is therefore: verify the untouched board baseline with `preflight`, provision KEY0/KEY1/KEY3/KEY4, verify those key blocks with `verify-device`, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), and enable Secure Boot last. The firmware is not expected to create any root key during that boot, and `SECURE_VERSION` remains zero throughout initial provisioning.
 
 After the device is provisioned, firmware updates do not consume any additional eFuse key slot or `SECURE_VERSION` bit. Keep the same Secure Boot signing key and per-device Flash Encryption key, choose an application security epoch, build a signed application, and pre-encrypt it for the fixed factory-app offset (`0x20000`):
 
