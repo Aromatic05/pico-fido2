@@ -60,6 +60,7 @@ assert_select A000000308 enabled PIV
 assert_select A000000527200101 enabled PIV-Yubico-AID
 assert_select D27600012401 enabled OpenPGP
 assert_select A0000005272101 enabled OATH
+assert_select A000000527210701 enabled HSM-Auth
 
 python3 - <<'PYLIVE'
 import socket
@@ -168,6 +169,23 @@ with SocketOtpConnection() as otp:
     mgmt.write_device_config(DeviceConfig({TRANSPORT.USB: supported}))
 print(f'live OATH session revoked without reboot: PASS ({sw1:02x}{sw2:02x})')
 
+hsmauth_aid=bytes.fromhex('A000000527210701')
+_, sw1, sw2=ccid.transmit([0x00,0xA4,0x04,0x00,len(hsmauth_aid),*hsmauth_aid])
+assert (sw1,sw2)==(0x90,0x00), f'HSM Auth SELECT: {sw1:02x}{sw2:02x}'
+_, sw1, sw2=ccid.transmit([0x00,0x09,0x00,0x00])
+assert (sw1,sw2)==(0x90,0x00), f'HSM Auth GET_MGMT_RETRIES before disable: {sw1:02x}{sw2:02x}'
+with SocketOtpConnection() as otp:
+    mgmt=ManagementSession(otp)
+    info=mgmt.read_device_info()
+    enabled=info.config.enabled_capabilities[TRANSPORT.USB]
+    mgmt.write_device_config(DeviceConfig({TRANSPORT.USB: enabled & ~CAPABILITY.HSMAUTH}))
+_, sw1, sw2=ccid.transmit([0x00,0x09,0x00,0x00])
+assert (sw1,sw2)!=(0x90,0x00), f'live HSM Auth session survived disable: {sw1:02x}{sw2:02x}'
+with SocketOtpConnection() as otp:
+    mgmt=ManagementSession(otp)
+    mgmt.write_device_config(DeviceConfig({TRANSPORT.USB: supported}))
+print(f'live HSM Auth session revoked without reboot: PASS ({sw1:02x}{sw2:02x})')
+
 management_aid=bytes.fromhex('A000000527471117')
 with SocketOtpConnection() as otp:
     mgmt=ManagementSession(otp)
@@ -184,11 +202,12 @@ with SocketOtpConnection() as otp:
 print(f'management-over-CCID bit enforcement: PASS ({sw1:02x}{sw2:02x})')
 PYLIVE
 
-for app in PIV OPENPGP OATH OTP U2F FIDO2; do
+for app in PIV OPENPGP OATH HSMAUTH OTP U2F FIDO2; do
   case "$app" in
     PIV) aid=A000000308; label=PIV ;;
     OPENPGP) aid=D27600012401; label=OpenPGP ;;
     OATH) aid=A0000005272101; label=OATH ;;
+    HSMAUTH) aid=A000000527210701; label=HSM-Auth ;;
     OTP) aid=A0000005272001; label=OTP ;;
     U2F) aid=A0000005271002; label=U2F ;;
     FIDO2) aid=A0000006472F0001; label=FIDO2 ;;
