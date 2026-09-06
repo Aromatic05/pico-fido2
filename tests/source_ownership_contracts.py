@@ -227,6 +227,17 @@ def verify_wifi_commissioning() -> None:
             '\\"minCpuMHz\\"' in status_get and '\\"maxCpuMHz\\"' in status_get and
             '\\"lightSleep\\"' in status_get,
             "maintenance status must expose configured DFS/light-sleep bounds")
+    require("esp_app_get_description()" in status_get and
+            "esp_ota_get_running_partition()" in status_get and
+            "esp_partition_get_sha256" in status_get,
+            "maintenance status must derive firmware provenance from public ESP-IDF app/partition APIs")
+    require('\\"projectVersion\\"' in status_get and
+            '\\"securityVersion\\"' in status_get and
+            '\\"appElfSha256\\"' in status_get and
+            '\\"imageSha256\\"' in status_get,
+            "maintenance status must expose project/version and unambiguous firmware digest fields")
+    require('char image_sha_json[67] = "null"' in status_get,
+            "running image SHA failure must be represented as null rather than a fabricated digest")
     for secret_marker in ("BLOCK_KEY", "KEY_PURPOSE", "flash_encryption_key", "mkek", "device_key"):
         require(secret_marker not in status_get,
                 f"maintenance status must not expose provisioning/key material: {secret_marker}")

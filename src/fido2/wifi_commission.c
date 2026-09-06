@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_app_desc.h"
 #include "esp_efuse.h"
 #include "esp_efuse_table.h"
 #include "esp_flash_encrypt.h"
@@ -15,6 +16,8 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_pm.h"
 #include "esp_random.h"
 #include "esp_secure_boot.h"
@@ -146,6 +149,24 @@ static esp_err_t index_get(httpd_req_t *req) {
 
 static esp_err_t status_get(httpd_req_t *req) {
     touch_activity();
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+    uint8_t image_sha[32] = {0};
+    bool image_sha_ok = running_partition != NULL &&
+                        esp_partition_get_sha256(running_partition, image_sha) == ESP_OK;
+    char image_sha_hex[65] = {0};
+    char image_sha_json[67] = "null";
+    char elf_sha_hex[65] = {0};
+    for (size_t i = 0; i < 32; ++i) {
+        snprintf(elf_sha_hex + i * 2, 3, "%02x", app_desc->app_elf_sha256[i]);
+        if (image_sha_ok) {
+            snprintf(image_sha_hex + i * 2, 3, "%02x", image_sha[i]);
+        }
+    }
+    if (image_sha_ok) {
+        snprintf(image_sha_json, sizeof(image_sha_json), "\"%s\"", image_sha_hex);
+    }
+
     esp_pm_config_t pm = {
         .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
         .min_freq_mhz = 80,
@@ -159,12 +180,15 @@ static esp_err_t status_get(httpd_req_t *req) {
     bool usb_download = !esp_efuse_read_field_bit(
         ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE);
 
-    char body[768];
+    char body[1152];
     int len = snprintf(body, sizeof(body),
         "{\"device\":\"Pico FIDO2\",\"platform\":\"ESP32-S3\","
         "\"version\":\"%u.%u\",\"ssid\":\"%s\","
         "\"ble\":%s,\"devKeys\":%s,\"idleTimeoutSec\":%u,"
         "\"freeHeap\":%u,\"largestInternal\":%u,"
+        "\"firmware\":{\"project\":\"%.*s\",\"projectVersion\":\"%.*s\","
+        "\"securityVersion\":%u,\"appElfSha256\":\"%s\","
+        "\"imageSha256\":%s},"
         "\"security\":{\"secureBoot\":%s,\"flashEncryption\":%s,"
         "\"secureVersion\":%u,\"romDownload\":%s,"
         "\"usbSerialJtagDownload\":%s},"
@@ -184,6 +208,11 @@ static esp_err_t status_get(httpd_req_t *req) {
         (unsigned)CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC,
         (unsigned)esp_get_free_heap_size(),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (int)sizeof(app_desc->project_name), app_desc->project_name,
+        (int)sizeof(app_desc->version), app_desc->version,
+        (unsigned)app_desc->secure_version,
+        elf_sha_hex,
+        image_sha_json,
         secure_boot ? "true" : "false",
         flash_encryption ? "true" : "false",
         secure_version,
