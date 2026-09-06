@@ -198,15 +198,15 @@ Maintenance is deliberately short-lived and physically gated: only one Wi-Fi sta
 Wi-Fi only:
 
 ```bash
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi set-target esp32s3
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi build
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults;sdkconfig.wireless-layout.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.wifi.defaults;sdkconfig.wireless-layout.defaults" idf.py -B build-wifi -DSDKCONFIG=sdkconfig.wifi build
 ```
 
 BLE and Wi-Fi together:
 
 ```bash
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless set-target esp32s3
-SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless build
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.wireless-layout.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless set-target esp32s3
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.wireless-layout.defaults" idf.py -B build-wireless -DSDKCONFIG=sdkconfig.wireless build
 ```
 
 For the reversible hardware bring-up image, use the guarded helper after activating ESP-IDF 5.5:
@@ -361,7 +361,7 @@ A fully host-prepared 4 MiB security image can then be built without any connect
 ./tools/verify_esp32s3_security_bundle.py build-security-bundle build-provisioning
 ```
 
-The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2, requires pre-provisioned KEY3/KEY4, sets Flash Encryption to `REQUIRE_ALREADY_ENABLED`, XTS-encrypts the bootloader, partition table, application and initially erased `part0`, and decrypts every region again for byte-for-byte verification. The standalone verifier independently checks bundle/provisioning manifest hashes, decrypts all regions, verifies plaintext hashes, verifies the bootloader/application RSA-PSS signatures, and checks that initial `part0` decrypts to erased flash. Neither tool contains a device flash or eFuse write action.
+The hardware security profile reuses the same BLE, Wi-Fi commissioning, and low-power defaults as the reversible wireless image while retaining the secure partition-table offset. Its factory application partition spans `0x20000..0x200000` (1920 KiB), so enabling Secure Boot/Flash Encryption does not require dropping the wireless transports or maintenance portal. The bundle builder signs the bootloader/application with RSA-3072 Secure Boot v2, requires pre-provisioned KEY3/KEY4, sets Flash Encryption to `REQUIRE_ALREADY_ENABLED`, XTS-encrypts the bootloader, partition table, application and initially erased `part0`, and decrypts every region again for byte-for-byte verification. The standalone verifier independently checks bundle/provisioning manifest hashes, decrypts all regions, verifies plaintext hashes, verifies the bootloader/application RSA-PSS signatures, and checks that initial `part0` decrypts to erased flash. Neither tool contains a device flash or eFuse write action.
 
 The intended first hardware boot order is therefore: verify the untouched board baseline with `preflight`, provision KEY0/KEY1/KEY3/KEY4, verify those key blocks with `verify-device`, program the already encrypted bundle, set development Flash Encryption state (`SPI_BOOT_CRYPT_CNT=0b001`), enable Secure Boot last, and then confirm the final eFuse/key state with `verify-secure`. The firmware is not expected to create any root key during that boot, and `SECURE_VERSION` remains zero throughout initial provisioning.
 

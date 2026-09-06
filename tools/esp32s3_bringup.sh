@@ -5,7 +5,7 @@ mode="${1:-build}"
 port="${2:-}"
 build_dir="${BUILD_DIR:-build-bringup-wireless}"
 sdkconfig="${SDKCONFIG:-sdkconfig.bringup-wireless}"
-defaults='sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults'
+defaults='sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.wireless-layout.defaults'
 
 case "$mode" in
     build|flash) ;;

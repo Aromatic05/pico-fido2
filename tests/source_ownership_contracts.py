@@ -21,7 +21,10 @@ BLE = ROOT / "src" / "fido2" / "ble_fido.c"
 WIFI_COMMISSION = ROOT / "src" / "fido2" / "wifi_commission.c"
 WIFI_MANAGEMENT = ROOT / "src" / "fido2" / "wifi_management.c"
 WIFI_DEFAULTS = ROOT / "sdkconfig.wifi.defaults"
+WIRELESS_LAYOUT_DEFAULTS = ROOT / "sdkconfig.wireless-layout.defaults"
 BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
+SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
+UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_update_bundle.sh"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
 CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
@@ -180,6 +183,9 @@ def verify_wifi_commissioning() -> None:
     source = text(WIFI_COMMISSION)
     ble = text(BLE)
     defaults = text(WIFI_DEFAULTS)
+    wireless_layout = text(WIRELESS_LAYOUT_DEFAULTS)
+    security_bundle = text(SECURITY_BUNDLE)
+    update_bundle = text(UPDATE_BUNDLE)
     start = function_body(source, "fido_wifi_start")
     event = function_body(source, "wifi_event_handler")
     ble_stop = function_body(ble, "fido_ble_stop_for_commissioning")
@@ -297,6 +303,15 @@ def verify_wifi_commissioning() -> None:
     ):
         require(assignment in defaults,
                 f"commissioning Wi-Fi defaults must retain bounded memory profile: {assignment}")
+    require("PARTITION_TABLE" not in defaults,
+            "Wi-Fi feature defaults must not own a flash partition layout")
+    require('partitions.wireless.csv' in wireless_layout,
+            "reversible wireless layout must select partitions.wireless.csv")
+    for label, builder in (("initial secure", security_bundle), ("secure update", update_bundle)):
+        require("sdkconfig.ble.defaults" in builder and "sdkconfig.wifi.defaults" in builder,
+                f"{label} build must preserve BLE and Wi-Fi feature profiles")
+        require("sdkconfig.security-preprovisioned.defaults" in builder,
+                f"{label} build must retain the secure hardware profile")
 
 
 def verify_emulator_arbiter() -> None:

@@ -6,7 +6,7 @@ out_dir="${2:-build-security-bundle}"
 security_version="${3:-0}"
 build_dir=build-security-preprovisioned
 sdkconfig=sdkconfig.security-preprovisioned
-defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
+defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
 
 fail() {
     echo "security-bundle: $*" >&2
@@ -36,6 +36,11 @@ SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkcon
 
 for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
+    CONFIG_PICO_FIDO2_BLE=y \
+    CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
+    CONFIG_PM_ENABLE=y \
+    CONFIG_BT_CTRL_MODEM_SLEEP=y \
+    CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y \
     CONFIG_SECURE_BOOT=y \
     CONFIG_SECURE_BOOT_V2_ENABLED=y \
     CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y \

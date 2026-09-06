@@ -7,7 +7,7 @@ project_ver="${3:-7.4.1}"
 security_version="${4:-0}"
 build_dir=build-security-update
 sdkconfig=sdkconfig.security-update
-defaults='sdkconfig.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
+defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.anti-rollback-hardware.defaults'
 app_offset=0x20000
 
 fail() {
@@ -40,6 +40,11 @@ SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkcon
 
 for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
+    CONFIG_PICO_FIDO2_BLE=y \
+    CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
+    CONFIG_PM_ENABLE=y \
+    CONFIG_BT_CTRL_MODEM_SLEEP=y \
+    CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y \
     CONFIG_SECURE_BOOT=y \
     CONFIG_SECURE_BOOT_V2_ENABLED=y \
     CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y \
@@ -47,6 +52,7 @@ for expected in \
     CONFIG_SECURE_FLASH_ENC_ENABLED=y \
     CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y \
     CONFIG_SECURE_FLASH_REQUIRE_ALREADY_ENABLED=y \
+    CONFIG_PARTITION_TABLE_OFFSET=0x10000 \
     CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y \
     CONFIG_PICO_FIDO2_SECURITY_VERSION=${security_version}; do
     grep -qx "$expected" "$sdkconfig" || fail "missing config: $expected"
@@ -60,6 +66,8 @@ fi
 
 grep -qx 'CONFIG_SECURE_BOOT_SIGNING_KEY="build-provisioning/secure_boot_signing_key.pem"' "$sdkconfig" \
     || fail 'unexpected Secure Boot signing key path'
+grep -qx 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="pico-keys-sdk/config/esp32/partitions-secure.csv"' "$sdkconfig" \
+    || fail 'secure partition table is not selected'
 
 signing_key="$provision_dir/secure_boot_signing_key.pem"
 xts_key="$provision_dir/flash_encryption_key.bin"
