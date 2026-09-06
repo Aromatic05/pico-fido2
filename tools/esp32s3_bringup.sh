@@ -47,6 +47,7 @@ require_config 'CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic
 require_config 'CONFIG_PM_ENABLE=y' 'runtime power management'
 require_config 'CONFIG_BT_CTRL_MODEM_SLEEP=y' 'Bluetooth modem sleep'
 require_config 'CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y' '0 dBm Bluetooth transmit power'
+require_config 'CONFIG_BT_NIMBLE_NVS_PERSIST=y' 'persistent BLE bonds'
 require_config 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=300' 'bounded Wi-Fi maintenance timeout'
 reject_config 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' 'automatic light sleep'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
