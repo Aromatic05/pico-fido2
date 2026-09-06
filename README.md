@@ -191,9 +191,9 @@ BLE bonds are persisted in NimBLE's NVS store. Existing bonded peers may reconne
 
 The Wi-Fi profile keeps the radio off during normal boot. Press the BOOT button five times after startup to enter commissioning mode; outside maintenance mode this preserves the existing one-through-four press OTP slot behavior. Commissioning stops BLE, starts a WPA2 SoftAP named `PicoFIDO2-XXXX`, and exposes the maintenance page at `http://192.168.4.1`. The default development password is `pico-fido2`.
 
-The portal reports runtime device state, reads the existing YubiKey management capability mask, can enable/disable OTP/U2F/FIDO2/OATH/PIV/OpenPGP/HSM Auth/management USB applications through the same `man_write_config()` path used by USB management, can set/change/clear the same 16-byte configuration lock used by stock YubiKey management, can authorize the next BLE fresh-pairing window, and can revoke all persisted BLE bonds before opening one replacement pairing window. `/api/status` also exposes read-only security and power diagnostics through public ESP-IDF APIs: Secure Boot state, Flash Encryption state, decoded `SECURE_VERSION`, ROM/USB Serial-JTAG recovery availability, and the configured PM minimum/maximum CPU frequencies plus light-sleep state. Firmware provenance is reported separately as the ESP-IDF project name/version, application `secure_version`, app-descriptor ELF SHA-256, and the running app partition's ESP-IDF image SHA-256. These digest fields are intentionally named differently from the update bundle's whole-file plaintext/ciphertext SHA-256 values. If the running-image digest cannot be obtained, `imageSha256` is `null` rather than a fabricated value. No eFuse key block, key purpose, MKEK, device key, or Flash Encryption key material is exposed. Lock material is never returned by the status API and temporary HTTP/queue copies are explicitly zeroized. Successful configuration writes are flushed to flash on core0 under the global maintenance owner before HTTP reports success. The portal does not modify FIDO, HSM Auth, OpenPGP, or PIV credential/key material, firmware, or eFuses.
+The portal reports runtime device state, reads the existing YubiKey management capability mask, can enable/disable OTP/U2F/FIDO2/OATH/PIV/OpenPGP/HSM Auth/management USB applications through the same `man_write_config()` path used by USB management, can set/change/clear the same 16-byte configuration lock used by stock YubiKey management, can authorize the next BLE fresh-pairing window, and can revoke all persisted BLE bonds before opening one replacement pairing window. `/api/status` also exposes read-only security and power diagnostics through public ESP-IDF APIs: Secure Boot state, Flash Encryption state, decoded `SECURE_VERSION`, ROM/USB Serial-JTAG recovery availability, and the configured PM minimum/maximum CPU frequencies plus light-sleep state. Firmware provenance is reported separately as the ESP-IDF project name/version, application `secure_version`, app-descriptor ELF SHA-256, and the running app partition's ESP-IDF image SHA-256. These digest fields are intentionally named differently from update artifact hashes. If the running-image digest cannot be obtained, `imageSha256` is `null` rather than a fabricated value. No eFuse key block, key purpose, MKEK, device key, or Flash Encryption key material is exposed. Lock material is never returned by the status API and temporary HTTP/queue copies are explicitly zeroized. Successful configuration writes are flushed to flash on core0 under the global maintenance owner before HTTP reports success. The normal commissioning profile cannot write firmware. The separate secure A/B OTA profile adds only a signed application update endpoint; it still cannot modify FIDO, HSM Auth, OpenPGP, or PIV credential/key material or any eFuse.
 
-Maintenance is deliberately short-lived and physically gated: only one Wi-Fi station is accepted, the session reboots after five minutes of inactivity, and each commissioning session has a new 128-bit CSRF token. Persistent configuration changes and BLE trust changes additionally require one BOOT press immediately before the HTTP action; that confirmation is valid for 15 seconds and is consumed by exactly one mutation. While maintenance mode is active, this one-press confirmation is intercepted by the portal and is not routed to OTP. A plain maintenance reboot does not require or consume the mutation confirmation.
+Maintenance is deliberately short-lived and physically gated: only one Wi-Fi station is accepted, the session reboots after five minutes of inactivity, and each commissioning session has a new 128-bit CSRF token. Persistent configuration changes, BLE trust changes, and A/B firmware installation additionally require one BOOT press immediately before the HTTP action; that confirmation is valid for 15 seconds and is consumed by exactly one mutation. While maintenance mode is active, this one-press confirmation is intercepted by the portal and is not routed to OTP. A plain maintenance reboot does not require or consume the mutation confirmation.
 
 Wi-Fi only:
 
@@ -391,6 +391,43 @@ The update bundle binds its manifest `security_version` to the encrypted applica
 The updater fails closed unless Secure Boot and Flash Encryption are already enabled, ROM/USB download remains available, KEY0 is `SECURE_BOOT_DIGEST0`, the readable KEY0 digest matches the bundle trust anchor, and the current encrypted application can be read from flash and decrypted with the candidate provisioning KEY1 into a valid `pico_fido2` image. That last check binds a per-device XTS key even when several devices share the same Secure Boot signing key. `apply` repeats all checks immediately before writing, writes only raw ciphertext at `0x20000` with no esptool `--encrypt` flag, leaves the device in ROM mode, then re-reads the eFuse state and the encrypted app prefix to prove that eFuses did not change and the new app decrypts to the expected version/security version.
 
 This is a **single-slot ROM recovery update**, not an A/B OTA or live hot-patch mechanism. A power loss while the app region is being erased/written can leave the application unbootable and require another ROM update; the retained ROM download path is the recovery mechanism. Normal app updates do not advance `SECURE_VERSION` and never write anti-rollback eFuses. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gates verify that the eFuse image remains byte-for-byte unchanged and that non-application flash regions are untouched.
+
+### Secure A/B Wi-Fi OTA profile
+
+The optional A/B profile is deliberately separate from the single-slot recovery path. On 4 MiB flash it uses an encrypted 8 KiB `otadata` partition, two 1472 KiB application slots, and preserves the full 1 MiB `part0` store:
+
+```text
+0x011000  nvs       24 KiB
+0x017000  phy_init   4 KiB
+0x018000  otadata    8 KiB  encrypted
+0x020000  ota_0    1472 KiB
+0x190000  ota_1    1472 KiB
+0x300000  part0    1024 KiB encrypted
+```
+
+Build and independently verify the first host-prepared A/B security baseline without a connected device:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/build_esp32s3_ab_security_bundle.sh build-provisioning build-ab-security-bundle 0
+./tools/verify_esp32s3_ab_security_bundle.py build-ab-security-bundle build-provisioning
+./tools/test_esp32s3_ab_security_bundle.sh build-provisioning
+```
+
+The initial bundle pre-encrypts the Secure Boot v2 bootloader, partition table, erased `otadata`, signed `ota_0`, an erased logical `ota_1`, and erased `part0` with the existing per-device XTS key. With erased `otadata` and no factory partition, the stock ESP-IDF bootloader selects `ota_0` and records that raw-flashed baseline as `VALID`.
+
+Later Wi-Fi updates use a different artifact format: a **Secure Boot signed plaintext application**, not host-pre-encrypted ciphertext. The device writes the file with `esp_ota_write()` into the inactive app slot; because app partitions are encrypted under Flash Encryption, ESP-IDF transparently encrypts those writes with the device-local KEY1. The update client therefore never needs KEY1:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/build_esp32s3_ab_ota_update_bundle.sh build-provisioning build-ab-ota-update 7.4.2 3
+./tools/verify_esp32s3_ab_ota_update_bundle.py build-ab-ota-update build-provisioning --minimum-running-epoch 2
+./tools/test_esp32s3_ab_ota_update_bundle.sh build-provisioning
+```
+
+In maintenance mode, choose `pico_fido2-ota-signed.bin`, press BOOT once, and install it through `/api/update`. The handler holds the global maintenance owner for the upload, streams directly into the inactive slot, lets `esp_ota_end()` validate the image/Secure Boot signature, rejects a different project or an application `security_version` lower than the currently running image, and only then selects the new boot partition. The first updated boot remains `PENDING_VERIFY`; the application marks it valid only after the normal service loop has remained alive for five seconds, so an early crash, watchdog reset, or power loss rolls back to the previous slot.
+
+This A/B software rollback/downgrade policy does **not** enable ESP-IDF eFuse anti-rollback and does **not** advance `SECURE_VERSION`. The signed `security_version` field is used only as a software epoch until a separate, explicit irreversible revocation decision is made. ROM recovery remains available under the reversible experiment policy.
 
 ### Native host emulation
 
