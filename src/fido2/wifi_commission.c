@@ -133,11 +133,11 @@ static const char index_html[] =
     "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
     "<div class=card id=otaCard style='display:none'><h2>Firmware update</h2><p class=muted>Signed A/B update. Choose the signed plaintext application .bin, then press BOOT once and install within the physical confirmation window.</p>"
     "<input id=firmware type=file accept='.bin,application/octet-stream'><button id=updateButton onclick=installUpdate()>Install signed update</button><p id=otaState class=muted></p></div>"
-    "<div class=card><h2>Maintenance actions</h2><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
-    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
+    "<div class=card><h2>Maintenance actions</h2><span id=bleActions><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button></span><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
+    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),bleActions=document.getElementById('bleActions'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
-    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
+    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.';bleActions.style.display=s.bleSupported?'inline':'none';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
     "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
     "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}unlockInput.value='';await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
@@ -215,7 +215,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     int len = snprintf(body, sizeof(body),
         "{\"device\":\"Pico FIDO2\",\"platform\":\"ESP32-S3\","
         "\"version\":\"%u.%u\",\"ssid\":\"%s\","
-        "\"ble\":%s,\"devKeys\":%s,\"idleTimeoutSec\":%u,"
+        "\"bleSupported\":%s,\"ble\":%s,\"devKeys\":%s,\"idleTimeoutSec\":%u,"
         "\"freeHeap\":%u,\"largestInternal\":%u,"
         "\"firmware\":{\"project\":\"%.*s\",\"projectVersion\":\"%.*s\","
         "\"securityVersion\":%u,\"appElfSha256\":\"%s\","
@@ -227,8 +227,10 @@ static esp_err_t status_get(httpd_req_t *req) {
         "\"maxCpuMHz\":%d,\"lightSleep\":%s},\"ota\":%s}",
         PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR, softap_ssid,
 #if CONFIG_PICO_FIDO2_BLE
+        "true",
         fido_ble_is_running() ? "true" : "false",
 #else
+        "false",
         "false",
 #endif
 #if CONFIG_PICOKEYS_ESP32_DEV_KEYS
@@ -468,6 +470,7 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     return err;
 }
 
+#if CONFIG_PICO_FIDO2_BLE
 static esp_err_t ble_pairing_post(httpd_req_t *req) {
     touch_activity();
     if (!csrf_valid(req)) {
@@ -515,6 +518,7 @@ static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
     }
     return err;
 }
+#endif
 
 #if CONFIG_PICO_FIDO2_AB_OTA
 static esp_err_t ota_error_response(httpd_req_t *req, esp_err_t err,
@@ -641,8 +645,10 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
         {.uri = "/api/config/lock", .method = HTTP_POST, .handler = config_lock_post},
+#if CONFIG_PICO_FIDO2_BLE
         {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
         {.uri = "/api/ble/bonds/reset", .method = HTTP_POST, .handler = ble_bond_reset_post},
+#endif
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
 #if CONFIG_PICO_FIDO2_AB_OTA
         {.uri = "/api/update", .method = HTTP_POST, .handler = update_post},

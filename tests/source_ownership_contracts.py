@@ -226,6 +226,11 @@ def verify_wifi_commissioning() -> None:
             "BLE transport task must remain quiescent after commissioning deinitializes NimBLE")
     require("fido_ble_is_running() ? \"true\" : \"false\"" in status_get,
             "commissioning status must report the runtime BLE state rather than compile-time capability")
+    require('\\"bleSupported\\"' in status_get and
+            "#if CONFIG_PICO_FIDO2_BLE\nstatic esp_err_t ble_pairing_post" in source,
+            "Wi-Fi-only builds must report BLE capability explicitly and compile BLE maintenance handlers only when BLE exists")
+    require("#if CONFIG_PICO_FIDO2_BLE\n        {.uri = \"/api/ble/pairing\"" in source,
+            "Wi-Fi-only builds must not register BLE maintenance routes")
     require("esp_secure_boot_enabled()" in status_get and
             "esp_flash_encryption_enabled()" in status_get and
             "esp_efuse_read_secure_version()" in status_get,
