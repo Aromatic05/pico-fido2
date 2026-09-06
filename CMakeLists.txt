@@ -17,8 +17,9 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-set(USB_VID 0x1D50)
-set(USB_PID 0x619B)
+set(USB_VID 0x1050)
+set(USB_PID 0x0407)
+add_compile_definitions(PICO_FIDO_DEVICE_VERSION=0x0507)
 
 if(ESP_PLATFORM)
     set(DEBUG_APDU 1)
@@ -72,10 +73,10 @@ endif()
 
 if(ENABLE_OTP_APP OR ENABLE_OATH_APP)
     set(USB_ITF_CCID 1)
-    set(USB_ITF_WCID 1)
 else()
     set(USB_ITF_CCID 0)
 endif()
+set(USB_ITF_WCID 0)
 
 set(USB_ITF_HID 1)
 include(pico-keys-sdk/pico_keys_sdk_import.cmake)
