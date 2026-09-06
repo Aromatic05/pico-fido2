@@ -437,6 +437,8 @@ static void fido_ble_advertise(void) {
     struct ble_gap_adv_params params = {0};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
+    params.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &params, fido_ble_gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "advertisement start: %d", rc);

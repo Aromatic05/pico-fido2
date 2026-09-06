@@ -44,6 +44,10 @@ require_config 'CONFIG_APP_REPRODUCIBLE_BUILD=y' 'reproducible application build
 require_config 'CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6' 'bounded Wi-Fi static RX buffers'
 require_config 'CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic RX buffers'
 require_config 'CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic TX buffers'
+require_config 'CONFIG_PM_ENABLE=y' 'runtime power management'
+require_config 'CONFIG_BT_CTRL_MODEM_SLEEP=y' 'Bluetooth modem sleep'
+require_config 'CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y' '0 dBm Bluetooth transmit power'
+reject_config 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' 'automatic light sleep'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
 reject_config 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' 'Flash Encryption'
 
