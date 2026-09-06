@@ -20,3 +20,9 @@ CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
 CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
 CONFIG_SECURE_FLASH_REQUIRE_ALREADY_ENABLED=y
 CONFIG_SECURE_FLASH_UART_BOOTLOADER_ALLOW_ENC=y
+
+# Recovery-first experiment policy: do not enable ESP-IDF NVS Encryption until
+# the partition table deliberately provides an nvs_keys partition. Flash
+# Encryption remains enabled for the device; this avoids the startup-time
+# nvs_sec_provider abort caused by a missing nvs_keys partition.
+# CONFIG_NVS_ENCRYPTION is not set

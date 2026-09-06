@@ -81,14 +81,15 @@ config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
         maintenance mode and restores the normal BLE FIDO transport.
 
 config PICO_FIDO2_AB_OTA
-    bool "Signed A/B firmware update through maintenance Wi-Fi"
+    bool "Signed A/B firmware update"
     default n
-    depends on PICO_FIDO2_WIFI_COMMISSIONING
     help
-        Stream a signed plaintext application to the inactive OTA partition.
-        Secure Boot verifies the image and Flash Encryption encrypts writes
-        with the device-local key. This feature uses ESP-IDF software rollback
-        and does not advance the irreversible SECURE_VERSION eFuse.
+        Enable the transport-independent A/B update and boot-confirmation
+        lifecycle. When Wi-Fi maintenance is also enabled it exposes the
+        signed plaintext upload endpoint there. Secure Boot verifies the image
+        and Flash Encryption encrypts writes with the device-local key. This
+        feature uses ESP-IDF software rollback and does not advance the
+        irreversible SECURE_VERSION eFuse.
 
 config PICO_FIDO2_OTA_CONFIRM_DELAY_SEC
     int "A/B OTA boot confirmation delay in seconds"

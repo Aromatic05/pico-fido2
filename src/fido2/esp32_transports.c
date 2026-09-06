@@ -1,6 +1,6 @@
 #include "sdkconfig.h"
 
-#if CONFIG_PICO_FIDO2_BLE || CONFIG_PICO_FIDO2_WIFI_COMMISSIONING
+#if CONFIG_PICO_FIDO2_BLE || CONFIG_PICO_FIDO2_WIFI_COMMISSIONING || CONFIG_PICO_FIDO2_AB_OTA
 
 #include "esp_err.h"
 #include "nvs_flash.h"

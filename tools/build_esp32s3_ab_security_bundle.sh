@@ -66,6 +66,9 @@ fi
 if grep -qx 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' "$sdkconfig"; then
     fail 'A/B initial bundle unexpectedly uses development root keys'
 fi
+if grep -qx 'CONFIG_NVS_ENCRYPTION=y' "$sdkconfig"; then
+    fail 'A/B initial bundle enables NVS Encryption without an nvs_keys partition'
+fi
 if grep -qx 'CONFIG_PICO_FIDO2_QEMU=y' "$sdkconfig"; then
     fail 'A/B initial bundle unexpectedly uses QEMU platform mode'
 fi

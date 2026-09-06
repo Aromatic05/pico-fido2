@@ -25,8 +25,11 @@ WIFI_OTA_POLICY = ROOT / "src" / "fido2" / "wifi_ota_policy.c"
 WIFI_DEFAULTS = ROOT / "sdkconfig.wifi.defaults"
 WIRELESS_LAYOUT_DEFAULTS = ROOT / "sdkconfig.wireless-layout.defaults"
 SECURE_OTA_DEFAULTS = ROOT / "sdkconfig.secure-ota.defaults"
+SECURITY_PREPROVISIONED_DEFAULTS = ROOT / "sdkconfig.security-preprovisioned.defaults"
 DEVELOPMENT_MAINTENANCE_DEFAULTS = ROOT / "sdkconfig.development-maintenance.defaults"
 TRANSPORT_KCONFIG = ROOT / "src" / "fido2" / "Kconfig"
+FIDO2_CMAKE = ROOT / "src" / "fido2" / "CMakeLists.txt"
+ESP32_TRANSPORTS = ROOT / "src" / "fido2" / "esp32_transports.c"
 SECURE_OTA_PARTITIONS = ROOT / "pico-keys-sdk" / "config" / "esp32" / "partitions-secure-ota.csv"
 BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
 SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
@@ -343,7 +346,11 @@ def verify_ab_ota() -> None:
     ota = text(WIFI_OTA)
     policy = text(WIFI_OTA_POLICY)
     defaults = text(SECURE_OTA_DEFAULTS)
+    security_defaults = text(SECURITY_PREPROVISIONED_DEFAULTS)
     partitions = text(SECURE_OTA_PARTITIONS)
+    transport_kconfig = text(TRANSPORT_KCONFIG)
+    fido2_cmake = text(FIDO2_CMAKE)
+    esp32_transports = text(ESP32_TRANSPORTS)
     update_post = function_body(portal, "update_post")
     begin = function_body(ota, "fido_ota_begin")
     finish = function_body(ota, "fido_ota_finish")
@@ -363,6 +370,21 @@ def verify_ab_ota() -> None:
             "secure A/B profile must enable product OTA and ESP-IDF software rollback")
     require("# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set" in defaults,
             "secure A/B profile must not enable irreversible eFuse anti-rollback")
+    ab_kconfig = transport_kconfig[
+        transport_kconfig.index("config PICO_FIDO2_AB_OTA"):
+        transport_kconfig.index("config PICO_FIDO2_OTA_CONFIRM_DELAY_SEC")
+    ]
+    require("depends on PICO_FIDO2_WIFI_COMMISSIONING" not in ab_kconfig,
+            "A/B rollback/confirmation lifecycle must not depend on the Wi-Fi upload transport")
+    require("CONFIG_PICO_FIDO2_AB_OTA" in fido2_cmake and
+            "${CMAKE_CURRENT_LIST_DIR}/esp32_transports.c" in fido2_cmake,
+            "A/B-only builds must retain the shared service-loop wrapper")
+    require("CONFIG_PICO_FIDO2_AB_OTA" in esp32_transports and
+            "fido_ota_boot_confirm_task()" in esp32_transports,
+            "A/B-only builds must run boot confirmation without BLE or Wi-Fi")
+    require("nvs_keys" not in partitions and
+            "# CONFIG_NVS_ENCRYPTION is not set" in security_defaults,
+            "recovery-first secure profile must keep NVS Encryption off until an nvs_keys partition exists")
 
     require("request_session_valid(req)" in update_post and
             "consume_physical_presence" not in update_post,
