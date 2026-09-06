@@ -311,11 +311,26 @@ After the device is provisioned, firmware updates do not consume any additional 
 . "$IDF_PATH/export.sh"
 ./tools/build_esp32s3_update_bundle.sh build-provisioning build-update-bundle 7.4.1 3
 ./tools/verify_esp32s3_update_bundle.py build-update-bundle build-provisioning --security-floor 2
+./tools/esp32s3_update.py verify build-update-bundle build-provisioning --security-floor 2
 ./tools/test_esp32s3_update_bundle.sh build-provisioning
 ./tools/test_esp32s3_rom_update_qemu.sh
 ```
 
-The update bundle binds its manifest `security_version` to the encrypted application's `esp_app_desc.secure_version`; the verifier can reject a bundle below a supplied device floor before flashing. It contains an app-only ciphertext image and must be written as raw ciphertext at `0x20000`; do **not** pass esptool's `--encrypt` flag to an already pre-encrypted update. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same XTS-AES-128 key. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gate additionally performs an encrypted app write after Secure Boot and Flash Encryption have been enabled, verifies that the eFuse image is byte-for-byte unchanged, and asserts that the bootloader, partition-table region, and `part0` credential-storage region are untouched.
+The update bundle binds its manifest `security_version` to the encrypted application's `esp_app_desc.secure_version`; the verifier can reject a bundle below a supplied device floor before flashing. It contains an app-only ciphertext image and must be written as raw ciphertext at `0x20000`; do **not** pass esptool's `--encrypt` flag to an already pre-encrypted update. It requires no eFuse changes: KEY0 continues to anchor the RSA-3072 Secure Boot signing key digest and KEY1 continues to hold the same per-device XTS-AES-128 key.
+
+`esp32s3_update.py` is the guarded host-side write path. Put the device in ROM download mode first, inspect without writing, then copy the reported MAC and ciphertext hash into the explicit apply command:
+
+```bash
+./tools/esp32s3_update.py inspect build-update-bundle build-provisioning --port /dev/ttyACM0
+./tools/esp32s3_update.py apply build-update-bundle build-provisioning \
+    --port /dev/ttyACM0 \
+    --expect-mac 12:34:56:78:9a:bc \
+    --expect-update-sha256 <ciphertext-sha256>
+```
+
+The updater fails closed unless Secure Boot and Flash Encryption are already enabled, ROM/USB download remains available, KEY0 is `SECURE_BOOT_DIGEST0`, the readable KEY0 digest matches the bundle trust anchor, and the current encrypted application can be read from flash and decrypted with the candidate provisioning KEY1 into a valid `pico_fido2` image. That last check binds a per-device XTS key even when several devices share the same Secure Boot signing key. `apply` repeats all checks immediately before writing, writes only raw ciphertext at `0x20000` with no esptool `--encrypt` flag, leaves the device in ROM mode, then re-reads the eFuse state and the encrypted app prefix to prove that eFuses did not change and the new app decrypts to the expected version/security version.
+
+This is a **single-slot ROM recovery update**, not an A/B OTA or live hot-patch mechanism. A power loss while the app region is being erased/written can leave the application unbootable and require another ROM update; the retained ROM download path is the recovery mechanism. Normal app updates do not advance `SECURE_VERSION` and never write anti-rollback eFuses. Local updates remain possible while ROM download and, on boards using it, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE` remain enabled. The ESP32-S3 USB Serial/JTAG controller is distinct from the USB-OTG ROM stack that Secure Boot/Flash Encryption disables. The QEMU ROM-update gates verify that the eFuse image remains byte-for-byte unchanged and that non-application flash regions are untouched.
 
 ### Native host emulation
 

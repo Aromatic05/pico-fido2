@@ -18,8 +18,10 @@ mkdir -p "$run_dir"
 [[ -n "${IDF_PATH:-}" ]] || fail 'IDF_PATH is not set; activate ESP-IDF 5.5 first'
 [[ -f "$provision_dir/manifest.json" ]] || fail "missing $provision_dir/manifest.json"
 
+python3 tests/esp32s3_update_tool_test.py >/dev/null
 ./tools/build_esp32s3_update_bundle.sh "$provision_dir" "$out_dir" "$version" "$security_version" >/dev/null
 ./tools/verify_esp32s3_update_bundle.py "$out_dir" "$provision_dir" --security-floor "$security_floor" >/dev/null
+./tools/esp32s3_update.py verify "$out_dir" "$provision_dir" --security-floor "$security_floor" >/dev/null
 
 manifest="$out_dir/manifest.json"
 encrypted="$out_dir/$(python3 - "$manifest" <<'PY'
@@ -71,6 +73,18 @@ python -m espsecure decrypt_flash_data --aes_xts --keyfile "$run_dir/wrong-xts.b
     --address 0x20000 --output "$run_dir/wrong-key.bin" "$encrypted" >/dev/null
 [[ "$(sha256sum "$run_dir/wrong-key.bin" | awk '{print $1}')" != "$plain_hash" ]] \
     || fail 'wrong XTS key recovered expected plaintext'
+python3 - "$run_dir/wrong-key.bin" <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, 'tools')
+import esp32s3_update
+try:
+    esp32s3_update.validate_decrypted_app_prefix(Path(sys.argv[1]).read_bytes()[:0x1000])
+except esp32s3_update.UpdateError:
+    pass
+else:
+    raise SystemExit('updater KEY1 preflight accepted wrong-key plaintext')
+PY
 
 # XTS is address-tweaked: the correct key at the wrong offset must also fail.
 python -m espsecure decrypt_flash_data --aes_xts --keyfile "$xts_key" \
@@ -108,6 +122,7 @@ printf 'security version %s >= floor %s: PASS\n' "$security_version" "$security_
 printf 'security floor negative test: PASS\n'
 printf 'manifest/image security version binding: PASS\n'
 printf 'same KEY1 XTS encryption: PASS\n'
+printf 'updater KEY1 device-binding preflight: PASS\n'
 printf 'wrong key negative test: PASS\n'
 printf 'wrong offset negative test: PASS\n'
 printf 'tamper negative test: PASS\n'
