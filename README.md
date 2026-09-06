@@ -429,6 +429,13 @@ In maintenance mode, choose `pico_fido2-ota-signed.bin`, press BOOT once, and in
 
 This A/B software rollback/downgrade policy does **not** enable ESP-IDF eFuse anti-rollback and does **not** advance `SECURE_VERSION`. The signed `security_version` field is used only as a software epoch until a separate, explicit irreversible revocation decision is made. ROM recovery remains available under the reversible experiment policy.
 
+The boot-state machine also has an ESP32-S3 QEMU gate that uses real ESP-IDF `otadata` transitions rather than a model. It proves the erased baseline becomes `ota_0 VALID`, a selected `ota_1` becomes `NEW -> PENDING_VERIFY`, an unconfirmed trial is marked `ABORTED` and rolls back to `ota_0`, while a trial that survives the five-second service-loop window becomes `VALID` and remains selected after another reboot. The disposable virtual eFuse image must remain byte-for-byte unchanged:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_ab_ota_qemu.sh
+```
+
 ### Native host emulation
 
 The native emulator can run FIDO2 and OpenPGP protocol smoke tests without an ESP32-S3 or any eFuse writes:
