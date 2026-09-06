@@ -11,6 +11,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cryptography.hazmat.primitives import cmac, hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import algorithms
+from cryptography.hazmat.primitives.kdf.x963kdf import X963KDF
 from yubikit.core import TRANSPORT
 from yubikit.core.smartcard import ApduError, SmartCardConnection, SW
 from yubikit.core.smartcard.scp import (
@@ -310,10 +314,144 @@ def run(binary: Path) -> None:
                 password,
             )
             session.delete_credential(DEFAULT_MANAGEMENT_KEY, "post-reset")
+
+            ec_label = "ec-main"
+            ec_private = ec.generate_private_key(ec.SECP256R1())
+            ec_credential = session.put_credential_asymmetric(
+                DEFAULT_MANAGEMENT_KEY,
+                ec_label,
+                ec_private,
+                password,
+            )
+            if ec_credential.algorithm != ALGORITHM.EC_P256_YUBICO_AUTHENTICATION:
+                raise AssertionError("wrong algorithm returned after asymmetric PUT")
+            if session.get_public_key(ec_label).public_numbers() != ec_private.public_key().public_numbers():
+                raise AssertionError("GET_PUBLIC_KEY does not match imported EC credential")
+
+            emulator.hard_kill()
+            emulator = Emulator(binary, run_dir)
+            emulator.start()
+            assert emulator.ccid is not None
+            session = HsmAuthSession(TcpSmartCardConnection(emulator.ccid))
+            if session.get_public_key(ec_label).public_numbers() != ec_private.public_key().public_numbers():
+                raise AssertionError("EC credential was not durable across power loss")
+
+            stale_epk_oce = session.get_challenge(ec_label)
+            if len(stale_epk_oce) != 65 or stale_epk_oce[0] != 0x04:
+                raise AssertionError("asymmetric GET_CHALLENGE did not return EPK-OCE")
+            stale_oce_public = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), stale_epk_oce
+            )
+            device_private = ec.generate_private_key(ec.SECP256R1())
+            stale_sd_private = ec.generate_private_key(ec.SECP256R1())
+            stale_epk_sd = stale_sd_private.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+            stale_shared = (
+                stale_sd_private.exchange(ec.ECDH(), stale_oce_public)
+                + device_private.exchange(ec.ECDH(), ec_private.public_key())
+            )
+            stale_keys = X963KDF(
+                algorithm=hashes.SHA256(),
+                length=64,
+                sharedinfo=b"\x3c\x88\x10",
+            ).derive(stale_shared)
+            stale_receipt_ctx = cmac.CMAC(algorithms.AES(stale_keys[:16]))
+            stale_receipt_ctx.update(stale_epk_sd + stale_epk_oce)
+            stale_receipt = stale_receipt_ctx.finalize()
+
+            emulator.hard_kill()
+            emulator = Emulator(binary, run_dir)
+            emulator.start()
+            assert emulator.ccid is not None
+            session = HsmAuthSession(TcpSmartCardConnection(emulator.ccid))
+            try:
+                session.calculate_session_keys_asymmetric(
+                    ec_label,
+                    stale_epk_oce + stale_epk_sd,
+                    device_private.public_key(),
+                    password,
+                    stale_receipt,
+                )
+            except ApduError as exc:
+                if exc.sw != SW.SECURITY_CONDITION_NOT_SATISFIED:
+                    raise AssertionError(f"unexpected stale challenge SW: {exc.sw:04x}") from exc
+            else:
+                raise AssertionError("ephemeral EC challenge survived power loss")
+
+            epk_oce = session.get_challenge(ec_label)
+            oce_public = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), epk_oce
+            )
+            sd_private = ec.generate_private_key(ec.SECP256R1())
+            epk_sd = sd_private.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+            shared = (
+                sd_private.exchange(ec.ECDH(), oce_public)
+                + device_private.exchange(ec.ECDH(), ec_private.public_key())
+            )
+            derived = X963KDF(
+                algorithm=hashes.SHA256(),
+                length=64,
+                sharedinfo=b"\x3c\x88\x10",
+            ).derive(shared)
+            receipt_ctx = cmac.CMAC(algorithms.AES(derived[:16]))
+            receipt_ctx.update(epk_sd + epk_oce)
+            receipt = receipt_ctx.finalize()
+            context_asym = epk_oce + epk_sd
+
+            expect_invalid_pin(
+                lambda: session.calculate_session_keys_asymmetric(
+                    ec_label,
+                    context_asym,
+                    device_private.public_key(),
+                    b"wrong-password!!",
+                    receipt,
+                ),
+                7,
+            )
+            ec_listed = [c for c in session.list_credentials() if c.label == ec_label]
+            if len(ec_listed) != 1 or ec_listed[0].counter != 7:
+                raise AssertionError("asymmetric credential retry counter did not decrement")
+
+            try:
+                session.calculate_session_keys_asymmetric(
+                    ec_label,
+                    context_asym,
+                    device_private.public_key(),
+                    password,
+                    b"\xff" * 16,
+                )
+            except ApduError as exc:
+                if exc.sw != SW.SECURITY_CONDITION_NOT_SATISFIED:
+                    raise AssertionError(f"unexpected asymmetric bad receipt SW: {exc.sw:04x}") from exc
+            else:
+                raise AssertionError("bad asymmetric receipt was accepted")
+
+            actual_asym = session.calculate_session_keys_asymmetric(
+                ec_label,
+                context_asym,
+                device_private.public_key(),
+                password,
+                receipt,
+            )
+            expected_asym = (derived[16:32], derived[32:48], derived[48:64])
+            if actual_asym[:3] != expected_asym:
+                raise AssertionError("asymmetric session keys differ from YubiHSM reference")
+            ec_listed = [c for c in session.list_credentials() if c.label == ec_label]
+            if len(ec_listed) != 1 or ec_listed[0].counter != 8:
+                raise AssertionError("successful asymmetric auth did not reset retries")
+
+            session.delete_credential(DEFAULT_MANAGEMENT_KEY, ec_label)
+            if any(c.label == ec_label for c in session.list_credentials()):
+                raise AssertionError("asymmetric DELETE did not remove credential")
         finally:
             emulator.stop()
 
-    print("stock yubikit YubiHSM Auth symmetric lifecycle: PASS")
+    print("stock yubikit YubiHSM Auth symmetric + asymmetric lifecycle: PASS")
 
 
 if __name__ == "__main__":
