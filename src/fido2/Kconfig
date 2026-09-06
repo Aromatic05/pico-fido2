@@ -69,4 +69,13 @@ config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
         Reboot after this much commissioning inactivity. Reboot exits Wi-Fi
         maintenance mode and restores the normal BLE FIDO transport.
 
+config PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC
+    int "Physical confirmation window in seconds"
+    range 5 60
+    default 15
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+    help
+        While commissioning is active, one BOOT press authorizes exactly one
+        persistent or trust-changing portal mutation during this short window.
+
 endmenu

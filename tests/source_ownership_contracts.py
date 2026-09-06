@@ -153,7 +153,12 @@ def verify_button_signals() -> None:
     require("presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES" in wifi,
             "commissioning must accept threshold-or-more presses so bounce cannot bypass it")
     require("previous_button_pressed_cb(presses)" in wifi,
-            "sub-threshold BOOT sequences must remain routable to OTP")
+            "sub-threshold BOOT sequences must remain routable to OTP outside maintenance mode")
+    before(wifi, "if (commissioning_started)",
+           "if (presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES)",
+           "maintenance-mode BOOT routing must take precedence over commissioning entry/OTP routing")
+    require("presses == 1" in wifi and "grant_physical_presence()" in wifi,
+            "exactly one BOOT press in maintenance mode must grant the one-shot mutation confirmation")
     before(otp, "slot == 0 || slot > (EF_OTP_SLOT4 - EF_OTP_SLOT1 + 1)",
            "uint16_t slot_ef = EF_OTP_SLOT1 + slot - 1",
            "OTP button callback must reject out-of-range slots before deriving a file id")
@@ -178,6 +183,11 @@ def verify_wifi_commissioning() -> None:
     start = function_body(source, "fido_wifi_start")
     event = function_body(source, "wifi_event_handler")
     ble_stop = function_body(ble, "fido_ble_stop_for_commissioning")
+    config_post = function_body(source, "config_post")
+    pairing_post = function_body(source, "ble_pairing_post")
+    reboot_post = function_body(source, "reboot_post")
+    grant_presence = function_body(source, "grant_physical_presence")
+    consume_presence = function_body(source, "consume_physical_presence")
 
     require("fido_ble_stop_for_commissioning()" in start,
             "Wi-Fi commissioning must fully stop BLE before enabling SoftAP")
@@ -203,6 +213,19 @@ def verify_wifi_commissioning() -> None:
             "BLE transport task must remain quiescent after commissioning deinitializes NimBLE")
     require("fido_ble_is_running() ? \"true\" : \"false\"" in function_body(source, "status_get"),
             "commissioning status must report the runtime BLE state rather than compile-time capability")
+    require("consume_physical_presence()" in config_post,
+            "persistent USB application changes must consume one physical BOOT confirmation")
+    require("consume_physical_presence()" in pairing_post,
+            "BLE trust changes must consume one physical BOOT confirmation")
+    require("consume_physical_presence()" not in reboot_post,
+            "non-persistent maintenance reboot must not consume the mutation confirmation")
+    for label, body in (("grant", grant_presence), ("consume", consume_presence)):
+        require("portENTER_CRITICAL(&presence_mux)" in body and
+                "portEXIT_CRITICAL(&presence_mux)" in body,
+                f"Wi-Fi physical presence {label} must serialize core0 and HTTP task access")
+    require("428 Precondition Required" in config_post and
+            "428 Precondition Required" in pairing_post,
+            "mutating maintenance APIs must fail closed when physical confirmation is absent")
     for assignment in (
         "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
         "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12",

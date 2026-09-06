@@ -24,6 +24,7 @@
 #include "pico_keys.h"
 #include "usb.h"
 #include "wifi_management.h"
+#include "wifi_presence_policy.h"
 #if CONFIG_PICO_FIDO2_BLE
 #include "ble_fido.h"
 #endif
@@ -36,6 +37,8 @@ static bool commissioning_started;
 static bool restart_requested;
 static TickType_t last_activity_tick;
 static int (*previous_button_pressed_cb)(uint8_t);
+static fido_wifi_presence_policy_t presence_policy;
+static portMUX_TYPE presence_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void touch_activity(void) {
     __atomic_store_n(&last_activity_tick, xTaskGetTickCount(), __ATOMIC_RELEASE);
@@ -83,6 +86,19 @@ static bool csrf_valid(httpd_req_t *req) {
            mbedtls_ct_memcmp(header, csrf_token, sizeof(csrf_token) - 1) == 0;
 }
 
+static void grant_physical_presence(void) {
+    portENTER_CRITICAL(&presence_mux);
+    fido_wifi_presence_grant(&presence_policy, board_millis());
+    portEXIT_CRITICAL(&presence_mux);
+}
+
+static bool consume_physical_presence(void) {
+    portENTER_CRITICAL(&presence_mux);
+    bool granted = fido_wifi_presence_consume(&presence_policy, board_millis());
+    portEXIT_CRITICAL(&presence_mux);
+    return granted;
+}
+
 static const char index_html[] =
     "<!doctype html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -91,7 +107,7 @@ static const char index_html[] =
     "h1{font-size:26px}h2{font-size:18px;margin-top:28px}.card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin:12px 0}"
     "label{display:block;padding:6px 0}button,input{font:inherit;background:#282828;color:#eee;border:1px solid #555;border-radius:6px;padding:8px 10px}"
     "button{cursor:pointer;margin-right:8px}.muted{color:#999}.bad{color:#ff8b8b}.ok{color:#8bd49c}code{font-family:ui-monospace,monospace}</style></head><body>"
-    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Physical commissioning mode. Changes use the same management policy as USB.</p>"
+    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Physical commissioning mode. Persistent or trust-changing actions require one BOOT press immediately before the action.</p>"
     "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
     "<div class=card><h2>USB applications</h2><div id=apps></div>"
     "<div id=unlockRow style='display:none'><label>Configuration lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
@@ -233,6 +249,10 @@ static esp_err_t config_post(httpd_req_t *req) {
     if (!parse_enabled(body, &enabled) || !parse_unlock(body, unlock, &unlock_present)) {
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid configuration\"}");
     }
+    if (!consume_physical_presence()) {
+        return json_response(req, "428 Precondition Required",
+                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
+    }
 
     uint16_t status_word = 0;
     fido_wifi_management_state_t state;
@@ -271,6 +291,10 @@ static esp_err_t ble_pairing_post(httpd_req_t *req) {
     touch_activity();
     if (!csrf_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
+    if (!consume_physical_presence()) {
+        return json_response(req, "428 Precondition Required",
+                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
     }
     esp_err_t err = fido_wifi_management_allow_ble_pairing();
     if (err != ESP_OK) {
@@ -429,6 +453,19 @@ static void fido_wifi_start(void) {
 }
 
 static int fido_wifi_button_pressed(uint8_t presses) {
+    if (commissioning_started) {
+        if (presses == 1) {
+            grant_physical_presence();
+            touch_activity();
+            ESP_LOGI(TAG, "physical confirmation granted for %d seconds",
+                     CONFIG_PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC);
+        }
+        else {
+            ESP_LOGI(TAG, "ignoring %u BOOT presses while maintenance mode is active",
+                     (unsigned)presses);
+        }
+        return 0;
+    }
     if (presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES) {
         fido_wifi_start();
         return 0;
@@ -441,6 +478,9 @@ static int fido_wifi_button_pressed(uint8_t presses) {
 
 void fido_wifi_init(void) {
     ESP_ERROR_CHECK(fido_wifi_management_init());
+    fido_wifi_presence_init(
+        &presence_policy,
+        CONFIG_PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC * 1000U);
     previous_button_pressed_cb = button_pressed_cb;
     button_pressed_cb = fido_wifi_button_pressed;
     ESP_LOGI(TAG, "Wi-Fi off; press BOOT %d times to enter commissioning",

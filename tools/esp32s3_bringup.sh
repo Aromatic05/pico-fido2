@@ -50,6 +50,7 @@ require_config 'CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y' '0 dBm Bluetooth transmi
 require_config 'CONFIG_BT_NIMBLE_NVS_PERSIST=y' 'persistent BLE bonds'
 require_config 'CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC=60' 'bounded fresh BLE pairing window'
 require_config 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=300' 'bounded Wi-Fi maintenance timeout'
+require_config 'CONFIG_PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC=15' 'one-shot physical confirmation window'
 reject_config 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' 'automatic light sleep'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
 reject_config 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' 'Flash Encryption'

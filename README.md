@@ -184,11 +184,15 @@ SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.
 SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults" idf.py -B build-ble -DSDKCONFIG=sdkconfig.ble build
 ```
 
-The bring-up BLE profile keeps pairing mode continuously available so radio, bonding, framing, and CTAP interoperability can be tested without provisioning eFuse keys. A production build must gate pairing mode behind deliberate user presence.
+BLE bonds are persisted in NimBLE's NVS store. Existing bonded peers may reconnect normally, but fresh or repeat pairing is fail-closed unless a one-time pairing grant has been created from the physically entered Wi-Fi maintenance portal. That grant is consumed on the next normal boot, opens a 60-second window, and authorizes exactly one new bond.
 
 ### ESP32-S3 Wi-Fi commissioning bring-up
 
-The Wi-Fi profile keeps the radio off during normal boot. Press the BOOT button five times after startup to enter commissioning mode; this preserves the existing one-through-four press OTP slot behavior. Commissioning starts a WPA2 SoftAP named `PicoFIDO2-XXXX` and a read-only page at `http://192.168.4.1`. The default development password is `pico-fido2`. The page currently exposes only device/build status; it does not modify credentials, OpenPGP data, firmware, or eFuses.
+The Wi-Fi profile keeps the radio off during normal boot. Press the BOOT button five times after startup to enter commissioning mode; outside maintenance mode this preserves the existing one-through-four press OTP slot behavior. Commissioning stops BLE, starts a WPA2 SoftAP named `PicoFIDO2-XXXX`, and exposes the maintenance page at `http://192.168.4.1`. The default development password is `pico-fido2`.
+
+The portal reports runtime device state, reads the existing YubiKey management capability mask, can enable/disable OTP/U2F/FIDO2/OATH/PIV/OpenPGP/management USB applications through the same `man_write_config()` path used by USB management, honors the existing 16-byte configuration lock, and can authorize the next BLE fresh-pairing window. Successful configuration writes are flushed to flash on core0 under the global maintenance owner before HTTP reports success. The portal does not modify credentials, OpenPGP/PIV key material, firmware, or eFuses.
+
+Maintenance is deliberately short-lived and physically gated: only one Wi-Fi station is accepted, the session reboots after five minutes of inactivity, and each commissioning session has a new 128-bit CSRF token. Persistent configuration changes and BLE trust changes additionally require one BOOT press immediately before the HTTP action; that confirmation is valid for 15 seconds and is consumed by exactly one mutation. While maintenance mode is active, this one-press confirmation is intercepted by the portal and is not routed to OTP. A plain maintenance reboot does not require or consume the mutation confirmation.
 
 Wi-Fi only:
 
@@ -214,7 +218,7 @@ For the reversible hardware bring-up image, use the guarded helper after activat
 
 The helper refuses to flash unless development root keys are enabled and both Secure Boot and Flash Encryption are disabled.
 
-Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. Wi-Fi configuration is kept in RAM for this bring-up mode. Production firmware should only enable commissioning after deliberate physical user presence.
+Wireless builds use a 1920 KiB application partition while keeping the PicoKeys data partition fixed at `0x200000`. SoftAP configuration is kept in RAM; management changes use the existing PicoKeys durable configuration store. Wi-Fi and BLE remain modal on ESP32-S3: entering maintenance fully stops NimBLE before the SoftAP starts, and reboot returns to normal USB/BLE mode.
 
 ### ESP32-S3 QEMU platform test
 
