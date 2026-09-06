@@ -11,7 +11,10 @@ if(CONFIG_PICO_FIDO2_BLE)
 endif()
 
 if(CONFIG_PICO_FIDO2_WIFI_COMMISSIONING)
-    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/wifi_commission.c)
+    list(APPEND SOURCES
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_commission.c
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_management.c
+    )
 endif()
 
 if(CONFIG_PICO_FIDO2_BLE OR CONFIG_PICO_FIDO2_WIFI_COMMISSIONING)

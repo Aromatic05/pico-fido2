@@ -3,6 +3,7 @@
 #if CONFIG_PICO_FIDO2_WIFI_COMMISSIONING
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -11,10 +12,16 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
+#include "fido/management.h"
 #include "fido/version.h"
 #include "pico_keys.h"
+#include "usb.h"
+#include "wifi_management.h"
 #if CONFIG_PICO_FIDO2_BLE
 #include "ble_fido.h"
 #endif
@@ -23,7 +30,13 @@ static const char *TAG = "fido_wifi";
 static httpd_handle_t http_server;
 static char softap_ssid[33];
 static bool commissioning_started;
+static bool restart_requested;
+static TickType_t last_activity_tick;
 static int (*previous_button_pressed_cb)(uint8_t);
+
+static void touch_activity(void) {
+    __atomic_store_n(&last_activity_tick, xTaskGetTickCount(), __ATOMIC_RELEASE);
+}
 
 static esp_err_t init_network_stack(void) {
     esp_err_t err = esp_netif_init();
@@ -41,30 +54,61 @@ static void commissioning_start_failed(const char *step, esp_err_t err) {
     ESP_LOGE(TAG, "%s failed: %s", step, esp_err_to_name(err));
 }
 
+static esp_err_t json_response(httpd_req_t *req, const char *status, const char *body) {
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t management_transport_error(httpd_req_t *req, esp_err_t err) {
+    if (err == ESP_ERR_INVALID_STATE) {
+        return json_response(req, "409 Conflict", "{\"error\":\"device busy\"}");
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        return json_response(req, "503 Service Unavailable", "{\"error\":\"management timeout\"}");
+    }
+    return json_response(req, "500 Internal Server Error", "{\"error\":\"management failure\"}");
+}
+
 static const char index_html[] =
     "<!doctype html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>Pico FIDO2</title>"
-    "<style>body{font:16px system-ui;margin:40px;max-width:720px}"
-    "pre{background:#111;color:#ddd;padding:16px;border-radius:8px;overflow:auto}"
-    "h1{font-size:28px}</style></head><body>"
-    "<h1>Pico FIDO2</h1><p>ESP32-S3 commissioning mode</p>"
-    "<pre id=s>loading...</pre>"
-    "<script>fetch('/api/status').then(r=>r.json()).then(x=>"
-    "s.textContent=JSON.stringify(x,null,2)).catch(e=>s.textContent=e)</script>"
+    "<title>Pico FIDO2 Maintenance</title>"
+    "<style>body{font:15px system-ui;margin:32px auto;max-width:760px;padding:0 18px;color:#ddd;background:#111}"
+    "h1{font-size:26px}h2{font-size:18px;margin-top:28px}.card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin:12px 0}"
+    "label{display:block;padding:6px 0}button,input{font:inherit;background:#282828;color:#eee;border:1px solid #555;border-radius:6px;padding:8px 10px}"
+    "button{cursor:pointer;margin-right:8px}.muted{color:#999}.bad{color:#ff8b8b}.ok{color:#8bd49c}code{font-family:ui-monospace,monospace}</style></head><body>"
+    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Physical commissioning mode. Changes use the same management policy as USB.</p>"
+    "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
+    "<div class=card><h2>USB applications</h2><div id=apps></div>"
+    "<div id=unlockRow style='display:none'><label>Configuration lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
+    "<p id=msg class=muted></p><button onclick=save()>Save configuration</button><button onclick=reboot()>Restart device</button></div>"
+    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),msgBox=document.getElementById('msg');"
+    "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
+    "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
+    "lockRow.style.display=c.locked?'block':'none';msgBox.textContent=c.locked?'Configuration is locked; the existing 16-byte lock code is required to save.':'Configuration is unlocked.'}"
+    "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
+    "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});const j=await r.json();"
+    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.';await load()}"
+    "async function reboot(){const r=await fetch('/api/reboot',{method:'POST'});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
 static esp_err_t index_get(httpd_req_t *req) {
+    touch_activity();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, index_html, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_get(httpd_req_t *req) {
-    char body[384];
+    touch_activity();
+    char body[448];
     int len = snprintf(body, sizeof(body),
         "{\"device\":\"Pico FIDO2\",\"platform\":\"ESP32-S3\","
         "\"version\":\"%u.%u\",\"ssid\":\"%s\","
-        "\"ble\":%s,\"devKeys\":%s,\"freeHeap\":%u,\"largestInternal\":%u}",
+        "\"ble\":%s,\"devKeys\":%s,\"idleTimeoutSec\":%u,"
+        "\"freeHeap\":%u,\"largestInternal\":%u}",
         PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR, softap_ssid,
 #if CONFIG_PICO_FIDO2_BLE
         fido_ble_is_running() ? "true" : "false",
@@ -72,15 +116,136 @@ static esp_err_t status_get(httpd_req_t *req) {
         "false",
 #endif
 #if CONFIG_PICOKEYS_ESP32_DEV_KEYS
-        "true"
+        "true",
 #else
-        "false"
+        "false",
 #endif
-        , (unsigned)esp_get_free_heap_size(),
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-    );
+        (unsigned)CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC,
+        (unsigned)esp_get_free_heap_size(),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, body, len);
+}
+
+static esp_err_t config_get(httpd_req_t *req) {
+    touch_activity();
+    fido_wifi_management_state_t state;
+    esp_err_t err = fido_wifi_management_get_state(&state);
+    if (err != ESP_OK) {
+        return management_transport_error(req, err);
+    }
+
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"supported\":%u,\"enabled\":%u,\"configured\":%s,\"locked\":%s,\"restartRequired\":true}",
+             state.supported, state.enabled,
+             state.configured ? "true" : "false",
+             state.locked ? "true" : "false");
+    return json_response(req, "200 OK", body);
+}
+
+static esp_err_t read_form_body(httpd_req_t *req, char *body, size_t body_size) {
+    if (req->content_len <= 0 || (size_t)req->content_len >= body_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) {
+            return ESP_FAIL;
+        }
+        received += (size_t)n;
+    }
+    body[received] = 0;
+    return ESP_OK;
+}
+
+static bool parse_enabled(const char *body, uint16_t *enabled) {
+    char value[16];
+    if (httpd_query_key_value(body, "enabled", value, sizeof(value)) != ESP_OK) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 0);
+    if (end == value || *end != 0 || parsed > UINT16_MAX) {
+        return false;
+    }
+    *enabled = (uint16_t)parsed;
+    return true;
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool parse_unlock(const char *body, uint8_t unlock[MAN_CONFIG_LOCK_LEN],
+                         bool *present) {
+    char value[MAN_CONFIG_LOCK_LEN * 2 + 1];
+    if (httpd_query_key_value(body, "unlock", value, sizeof(value)) != ESP_OK) {
+        *present = false;
+        return true;
+    }
+    if (strlen(value) != MAN_CONFIG_LOCK_LEN * 2) {
+        return false;
+    }
+    for (size_t i = 0; i < MAN_CONFIG_LOCK_LEN; ++i) {
+        int high = hex_nibble(value[i * 2]);
+        int low = hex_nibble(value[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        unlock[i] = (uint8_t)((high << 4) | low);
+    }
+    *present = true;
+    return true;
+}
+
+static esp_err_t config_post(httpd_req_t *req) {
+    touch_activity();
+    char body[128];
+    if (read_form_body(req, body, sizeof(body)) != ESP_OK) {
+        return json_response(req, "400 Bad Request", "{\"error\":\"invalid request body\"}");
+    }
+
+    uint16_t enabled = 0;
+    uint8_t unlock[MAN_CONFIG_LOCK_LEN] = {0};
+    bool unlock_present = false;
+    if (!parse_enabled(body, &enabled) || !parse_unlock(body, unlock, &unlock_present)) {
+        return json_response(req, "400 Bad Request", "{\"error\":\"invalid configuration\"}");
+    }
+
+    uint16_t status_word = 0;
+    fido_wifi_management_state_t state;
+    esp_err_t err = fido_wifi_management_set_enabled(
+        enabled, unlock, unlock_present, &status_word, &state);
+    if (err != ESP_OK) {
+        return management_transport_error(req, err);
+    }
+    if (status_word == MAN_SW_SECURITY_STATUS_NOT_SATISFIED) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"configuration lock rejected\"}");
+    }
+    if (status_word != MAN_SW_OK) {
+        return json_response(req, "400 Bad Request", "{\"error\":\"configuration rejected\"}");
+    }
+
+    char response[160];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"enabled\":%u,\"locked\":%s,\"restartRequired\":true}",
+             state.enabled, state.locked ? "true" : "false");
+    return json_response(req, "200 OK", response);
+}
+
+static esp_err_t reboot_post(httpd_req_t *req) {
+    touch_activity();
+    esp_err_t err = json_response(req, "202 Accepted", "{\"ok\":true}");
+    if (err == ESP_OK) {
+        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    }
+    return err;
 }
 
 static esp_err_t start_http_server(void) {
@@ -90,32 +255,29 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 2;
+    config.max_uri_handlers = 5;
     config.backlog_conn = 1;
     esp_err_t err = httpd_start(&http_server, &config);
     if (err != ESP_OK) {
         return err;
     }
 
-    const httpd_uri_t root = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = index_get,
+    const httpd_uri_t handlers[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = index_get},
+        {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
+        {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
+        {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
+        {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
     };
-    const httpd_uri_t status = {
-        .uri = "/api/status",
-        .method = HTTP_GET,
-        .handler = status_get,
-    };
-    err = httpd_register_uri_handler(http_server, &root);
-    if (err == ESP_OK) {
-        err = httpd_register_uri_handler(http_server, &status);
+    for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
+        err = httpd_register_uri_handler(http_server, &handlers[i]);
+        if (err != ESP_OK) {
+            httpd_stop(http_server);
+            http_server = NULL;
+            return err;
+        }
     }
-    if (err != ESP_OK) {
-        httpd_stop(http_server);
-        http_server = NULL;
-    }
-    return err;
+    return ESP_OK;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -130,6 +292,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
     else if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = event_data;
+        touch_activity();
         ESP_LOGI(TAG, "station " MACSTR " joined", MAC2STR(event->mac));
         esp_err_t err = start_http_server();
         if (err != ESP_OK) {
@@ -190,7 +353,7 @@ static void fido_wifi_start(void) {
             sizeof(config.ap.password));
     config.ap.channel = CONFIG_PICO_FIDO2_WIFI_CHANNEL;
     config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    config.ap.max_connection = 2;
+    config.ap.max_connection = 1;
     config.ap.pmf_cfg.required = true;
 
     err = esp_wifi_set_mode(WIFI_MODE_AP);
@@ -214,6 +377,7 @@ static void fido_wifi_start(void) {
         return;
     }
     commissioning_started = true;
+    touch_activity();
 
     ESP_LOGI(TAG, "commissioning AP %s started; HTTP starts after station join", softap_ssid);
 }
@@ -230,6 +394,7 @@ static int fido_wifi_button_pressed(uint8_t presses) {
 }
 
 void fido_wifi_init(void) {
+    ESP_ERROR_CHECK(fido_wifi_management_init());
     previous_button_pressed_cb = button_pressed_cb;
     button_pressed_cb = fido_wifi_button_pressed;
     ESP_LOGI(TAG, "Wi-Fi off; press BOOT %d times to enter commissioning",
@@ -237,6 +402,33 @@ void fido_wifi_init(void) {
 }
 
 void fido_wifi_task(void) {
+    fido_wifi_management_task();
+    if (!commissioning_started) {
+        return;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+    TickType_t last = __atomic_load_n(&last_activity_tick, __ATOMIC_ACQUIRE);
+    bool idle_expired = now - last >= pdMS_TO_TICKS(CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC * 1000U);
+    bool restart = __atomic_load_n(&restart_requested, __ATOMIC_ACQUIRE);
+    if (!idle_expired && !restart) {
+        return;
+    }
+    if (!card_try_claim_maintenance()) {
+        return;
+    }
+    if (low_flash_is_pending()) {
+        do_flash();
+    }
+    bool durable = !low_flash_is_pending();
+    card_release_maintenance();
+    if (!durable) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "%s; rebooting to normal USB/BLE mode",
+             restart ? "maintenance restart requested" : "maintenance idle timeout");
+    esp_restart();
 }
 
 #endif

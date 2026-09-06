@@ -21,9 +21,9 @@ config PICO_FIDO2_WIFI_COMMISSIONING
     default n
     depends on IDF_TARGET_ESP32S3
     help
-        Start a development commissioning SoftAP and read-only Web UI. This is
-        intended for bring-up; production firmware should gate commissioning
-        mode behind deliberate physical user presence.
+        Start a physically gated maintenance SoftAP. The Web UI reads device
+        status and reuses the YubiKey management configuration/lock semantics
+        for USB application enablement.
 
 config PICO_FIDO2_WIFI_SSID_PREFIX
     string "Commissioning SoftAP SSID prefix"
@@ -50,5 +50,14 @@ config PICO_FIDO2_WIFI_COMMISSION_PRESSES
         Pico FIDO2 currently maps one through four BOOT presses to OTP slots.
         Commissioning therefore uses five or more presses to avoid changing
         existing OTP button behavior.
+
+config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
+    int "Commissioning idle timeout in seconds"
+    range 30 3600
+    default 300
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+    help
+        Reboot after this much commissioning inactivity. Reboot exits Wi-Fi
+        maintenance mode and restores the normal BLE FIDO transport.
 
 endmenu
