@@ -39,9 +39,6 @@ static esp_err_t init_network_stack(void) {
 
 static void commissioning_start_failed(const char *step, esp_err_t err) {
     ESP_LOGE(TAG, "%s failed: %s", step, esp_err_to_name(err));
-#if CONFIG_PICO_FIDO2_BLE
-    fido_ble_set_advertising_enabled(true);
-#endif
 }
 
 static const char index_html[] =
@@ -150,10 +147,6 @@ static void fido_wifi_start(void) {
         return;
     }
 
-#if CONFIG_PICO_FIDO2_BLE
-    fido_ble_set_advertising_enabled(false);
-#endif
-
     uint8_t mac[6];
     esp_err_t err = esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     if (err != ESP_OK) {
@@ -204,6 +197,15 @@ static void fido_wifi_start(void) {
     if (err == ESP_OK) {
         err = esp_wifi_set_config(WIFI_IF_AP, &config);
     }
+#if CONFIG_PICO_FIDO2_BLE
+    if (err == ESP_OK) {
+        err = fido_ble_stop_for_commissioning();
+        if (err != ESP_OK) {
+            commissioning_start_failed("BLE commissioning transition", err);
+            return;
+        }
+    }
+#endif
     if (err == ESP_OK) {
         err = esp_wifi_start();
     }

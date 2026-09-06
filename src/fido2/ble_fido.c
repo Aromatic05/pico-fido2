@@ -108,6 +108,7 @@ static QueueHandle_t request_queue;
 static QueueHandle_t event_queue;
 static bool event_overflow;
 static bool advertising_enabled = true;
+static bool ble_stack_running;
 
 extern const uint8_t fido_aid[];
 extern void *cbor_thread(void *);
@@ -455,6 +456,35 @@ void fido_ble_set_advertising_enabled(bool enabled) {
     }
 }
 
+esp_err_t fido_ble_stop_for_commissioning(void) {
+    if (!ble_stack_running) {
+        return ESP_OK;
+    }
+    if (core_state != FIDO_BLE_CORE_IDLE || tx_active ||
+        fido_ble_request_pending() || card_command_is_owned_by(ble_itf)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    fido_ble_set_advertising_enabled(false);
+    int rc = nimble_port_stop();
+    if (rc != 0) {
+        __atomic_store_n(&advertising_enabled, true, __ATOMIC_RELEASE);
+        return ESP_FAIL;
+    }
+    esp_err_t err = nimble_port_deinit();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    ble_stack_running = false;
+    connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    status_subscribed = false;
+    tx_active = false;
+    tx_waiting = false;
+    ESP_LOGI(TAG, "BLE host/controller stopped for commissioning; reboot restores BLE");
+    return ESP_OK;
+}
+
 static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
     (void)arg;
     switch (event->type) {
@@ -675,9 +705,13 @@ void fido_ble_init(void) {
     assert(ble_gatts_add_svcs(fido_ble_services) == 0);
     ble_store_config_init();
     nimble_port_freertos_init(fido_ble_host_task);
+    ble_stack_running = true;
 }
 
 void fido_ble_task(void) {
+    if (!ble_stack_running) {
+        return;
+    }
     fido_ble_recover_event_overflow();
     fido_ble_process_events();
 

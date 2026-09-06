@@ -175,9 +175,16 @@ def verify_wifi_commissioning() -> None:
     defaults = text(WIFI_DEFAULTS)
     start = function_body(source, "fido_wifi_start")
     event = function_body(source, "wifi_event_handler")
+    ble_stop = function_body(ble, "fido_ble_stop_for_commissioning")
 
-    require("fido_ble_set_advertising_enabled(false)" in start,
-            "Wi-Fi commissioning must suspend BLE advertising before enabling SoftAP")
+    require("fido_ble_stop_for_commissioning()" in start,
+            "Wi-Fi commissioning must fully stop BLE before enabling SoftAP")
+    require("nimble_port_stop()" in ble_stop and "nimble_port_deinit()" in ble_stop,
+            "commissioning must stop both the NimBLE host and Bluetooth controller")
+    before(start, "esp_wifi_set_config(WIFI_IF_AP", "fido_ble_stop_for_commissioning()",
+           "Wi-Fi configuration preflight must complete before the modal BLE shutdown")
+    before(start, "fido_ble_stop_for_commissioning()", "esp_wifi_start()",
+           "Bluetooth must be fully stopped before the SoftAP starts")
     require("start_http_server()" not in start,
             "SoftAP startup must not allocate the HTTP server before a station connects")
     require("WIFI_EVENT_AP_STACONNECTED" in event and "start_http_server()" in event,
@@ -187,12 +194,11 @@ def verify_wifi_commissioning() -> None:
     require("ESP_ERROR_CHECK" not in start and
             "ESP_ERROR_CHECK" not in function_body(source, "init_network_stack"),
             "optional Wi-Fi commissioning setup must not abort the YubiKey core")
-    require("commissioning_start_failed" in start and
-            "fido_ble_set_advertising_enabled(true)" in function_body(source, "commissioning_start_failed"),
-            "failed commissioning startup must restore BLE advertising")
     require("__atomic_load_n(&advertising_enabled" in ble and
             "ble_gap_adv_stop()" in function_body(ble, "fido_ble_set_advertising_enabled"),
             "BLE advertising pause must be an explicit transport state, not a one-shot side effect")
+    require("if (!ble_stack_running)" in function_body(ble, "fido_ble_task"),
+            "BLE transport task must remain quiescent after commissioning deinitializes NimBLE")
     for assignment in (
         "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
         "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12",
