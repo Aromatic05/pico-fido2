@@ -67,7 +67,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         "\"ble\":%s,\"devKeys\":%s,\"freeHeap\":%u,\"largestInternal\":%u}",
         PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR, softap_ssid,
 #if CONFIG_PICO_FIDO2_BLE
-        "true",
+        fido_ble_is_running() ? "true" : "false",
 #else
         "false",
 #endif

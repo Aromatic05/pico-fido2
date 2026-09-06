@@ -6,5 +6,6 @@
 
 void fido_ble_set_advertising_enabled(bool enabled);
 esp_err_t fido_ble_stop_for_commissioning(void);
+bool fido_ble_is_running(void);
 
 #endif

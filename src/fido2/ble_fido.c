@@ -21,6 +21,7 @@
 #include "services/dis/ble_svc_dis.h"
 
 #include "apdu.h"
+#include "ble_fido.h"
 #include "ble_fido_frame.h"
 #include "fido/ctap2_cbor.h"
 #include "fido/fido.h"
@@ -457,7 +458,7 @@ void fido_ble_set_advertising_enabled(bool enabled) {
 }
 
 esp_err_t fido_ble_stop_for_commissioning(void) {
-    if (!ble_stack_running) {
+    if (!fido_ble_is_running()) {
         return ESP_OK;
     }
     if (core_state != FIDO_BLE_CORE_IDLE || tx_active ||
@@ -476,13 +477,17 @@ esp_err_t fido_ble_stop_for_commissioning(void) {
         return err;
     }
 
-    ble_stack_running = false;
+    __atomic_store_n(&ble_stack_running, false, __ATOMIC_RELEASE);
     connection_handle = BLE_HS_CONN_HANDLE_NONE;
     status_subscribed = false;
     tx_active = false;
     tx_waiting = false;
     ESP_LOGI(TAG, "BLE host/controller stopped for commissioning; reboot restores BLE");
     return ESP_OK;
+}
+
+bool fido_ble_is_running(void) {
+    return __atomic_load_n(&ble_stack_running, __ATOMIC_ACQUIRE);
 }
 
 static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
@@ -705,11 +710,11 @@ void fido_ble_init(void) {
     assert(ble_gatts_add_svcs(fido_ble_services) == 0);
     ble_store_config_init();
     nimble_port_freertos_init(fido_ble_host_task);
-    ble_stack_running = true;
+    __atomic_store_n(&ble_stack_running, true, __ATOMIC_RELEASE);
 }
 
 void fido_ble_task(void) {
-    if (!ble_stack_running) {
+    if (!fido_ble_is_running()) {
         return;
     }
     fido_ble_recover_event_overflow();

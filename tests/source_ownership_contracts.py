@@ -197,8 +197,10 @@ def verify_wifi_commissioning() -> None:
     require("__atomic_load_n(&advertising_enabled" in ble and
             "ble_gap_adv_stop()" in function_body(ble, "fido_ble_set_advertising_enabled"),
             "BLE advertising pause must be an explicit transport state, not a one-shot side effect")
-    require("if (!ble_stack_running)" in function_body(ble, "fido_ble_task"),
+    require("if (!fido_ble_is_running())" in function_body(ble, "fido_ble_task"),
             "BLE transport task must remain quiescent after commissioning deinitializes NimBLE")
+    require("fido_ble_is_running() ? \"true\" : \"false\"" in function_body(source, "status_get"),
+            "commissioning status must report the runtime BLE state rather than compile-time capability")
     for assignment in (
         "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
         "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12",
