@@ -384,6 +384,50 @@ def build_write_command(port: str, encrypted_path: Path) -> list[str]:
     return command
 
 
+def build_read_command(port: str, offset: int, size: int, output_path: Path) -> list[str]:
+    if offset < 0 or size <= 0:
+        raise UpdateError("invalid flash read range")
+    return [
+        sys.executable,
+        "-m",
+        "esptool",
+        "--chip",
+        "esp32s3",
+        "--port",
+        port,
+        "--before",
+        "no_reset",
+        "--after",
+        "no_reset",
+        "--no-stub",
+        "read_flash",
+        hex(offset),
+        hex(size),
+        str(output_path),
+    ]
+
+
+def read_raw_flash(port: str, offset: int, size: int, output_path: Path) -> None:
+    capture(build_read_command(port, offset, size, output_path))
+
+
+def verify_written_ciphertext(port: str, bundle: UpdateBundle) -> str:
+    expected_size = bundle.encrypted_path.stat().st_size
+    with tempfile.TemporaryDirectory(prefix="pico-update-readback-") as td:
+        readback = Path(td) / "app-ciphertext.bin"
+        read_raw_flash(port, APP_OFFSET, expected_size, readback)
+        if readback.stat().st_size != expected_size:
+            raise UpdateError(
+                f"post-write ciphertext size {readback.stat().st_size} != expected {expected_size}"
+            )
+        actual_hash = sha256(readback)
+    if actual_hash != bundle.encrypted_sha256:
+        raise UpdateError(
+            f"post-write ciphertext SHA256 {actual_hash} != expected {bundle.encrypted_sha256}"
+        )
+    return actual_hash
+
+
 def print_plan(
     state: DeviceSecurityState,
     bundle: UpdateBundle,
