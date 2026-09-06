@@ -286,22 +286,35 @@ KEY5 = FREE
 ./tools/esp32s3_provision.py plan
 ./tools/esp32s3_provision.py generate --output-dir build-provisioning
 ./tools/esp32s3_provision.py verify build-provisioning/manifest.json
+./tools/esp32s3_provision.py bind-target \
+    --manifest build-provisioning/manifest.json \
+    --factory-mac 12:34:56:78:9a:bc \
+    --output build-provisioning/target-123456789abc.json
 ```
+
+`bind-target` is host-only. The resulting mode-0600 target manifest binds one exact factory MAC to the SHA-256 of the provisioning manifest and its Secure Boot digest. This prevents a valid per-device KEY1/MKEK/device-key set from being silently reused for another board. The target is checked before any virtual burn and can replace a manually retyped `--expect-mac` on later read-only device inspections.
 
 The exact KEY0/KEY1/KEY3/KEY4 burn sequence can be rehearsed against an `espefuse --virt` backing file without exposing any physical-device key-write path. Initialize the virtual file with the existing read-only preflight, inspect the pending plan, then explicitly apply it:
 
 ```bash
 ./tools/esp32s3_provision.py preflight --virt-file build-provisioning/efuse-virtual.bin
-./tools/esp32s3_provision.py provision-virtual \
-    --virt-file build-provisioning/efuse-virtual.bin \
-    --manifest build-provisioning/manifest.json
+./tools/esp32s3_provision.py bind-target \
+    --manifest build-provisioning/manifest.json \
+    --factory-mac 00:00:00:00:00:00 \
+    --output build-provisioning/target-virtual.json
 ./tools/esp32s3_provision.py provision-virtual \
     --virt-file build-provisioning/efuse-virtual.bin \
     --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json
+./tools/esp32s3_provision.py provision-virtual \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json \
     --apply
 ./tools/esp32s3_provision.py verify-device \
     --virt-file build-provisioning/efuse-virtual.bin \
-    --manifest build-provisioning/manifest.json
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json
 ```
 
 `provision-virtual` has no `--port` argument. It is dry-run by default, is idempotent once all four blocks match, and can resume only while every previously written block is still independently verifiable. In particular, if KEY1 has already become read-protected while any other required block is incomplete, the tool refuses to continue because the Flash Encryption key can no longer be compared with the manifest. Initial provisioning also refuses any nonzero `SECURE_VERSION`.
@@ -313,12 +326,13 @@ The virtual failure-state gate covers full provisioning, idempotency, safe reada
 ./tools/test_esp32s3_virtual_provisioning.sh
 ```
 
-Before any hardware key provisioning, run the read-only blank-device preflight and bind the inspection to the exact factory MAC. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
+Before any hardware key provisioning, create the target manifest from the factory MAC, then run the read-only blank-device preflight against that binding. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
 
 ```bash
 ./tools/esp32s3_provision.py preflight \
     --port /dev/ttyACM0 \
-    --expect-mac 12:34:56:78:9a:bc
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-123456789abc.json
 ```
 
 After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabling Flash Encryption or Secure Boot, the separate read-only verification checks the key purposes, key-block write protection, KEY1 read protection, and exact readable KEY0/KEY3/KEY4 material against the host manifest:
@@ -326,11 +340,11 @@ After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabl
 ```bash
 ./tools/esp32s3_provision.py verify-device \
     --port /dev/ttyACM0 \
-    --expect-mac 12:34:56:78:9a:bc \
-    --manifest build-provisioning/manifest.json
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-123456789abc.json
 ```
 
-`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. `provision-virtual --apply` writes only the specified virtual backing file; the tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. `--expect-mac` remains available as a manual compatibility guard, but a target manifest is preferred because it also binds the MAC to the exact provisioning-manifest hash. `provision-virtual --apply` writes only the specified virtual backing file; the tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
 
 After the encrypted image has been programmed and the development Flash Encryption state plus Secure Boot have both been enabled, use the final read-only verifier before treating the device as a secured candidate:
 

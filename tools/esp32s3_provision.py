@@ -169,6 +169,59 @@ def mac_argument(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def bind_target_manifest(provision_manifest: Path, factory_mac: str, output: Path) -> Path:
+    verify_manifest(provision_manifest, quiet=True)
+    provision = json.loads(provision_manifest.read_text())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        raise SystemExit(f"target manifest already exists: {output}")
+    target = {
+        "schema": 1,
+        "kind": "esp32s3-provisioning-target",
+        "chip": "esp32s3",
+        "factory_mac": normalize_mac(factory_mac),
+        "provisioning_manifest_sha256": sha256(provision_manifest),
+        "secure_boot_digest_hex": provision["secure_boot_digest_hex"],
+    }
+    write_secret(output, (json.dumps(target, indent=2, sort_keys=True) + "\n").encode())
+    return output
+
+
+def verify_target_manifest(target_path: Path, provision_manifest: Path) -> str:
+    verify_manifest(provision_manifest, quiet=True)
+    try:
+        target = json.loads(target_path.read_text())
+        provision = json.loads(provision_manifest.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid provisioning target manifest: {target_path}") from exc
+    if target.get("schema") != 1 or target.get("kind") != "esp32s3-provisioning-target":
+        raise SystemExit("unexpected provisioning target schema/kind")
+    if target.get("chip") != "esp32s3":
+        raise SystemExit("provisioning target is not for ESP32-S3")
+    try:
+        factory_mac = normalize_mac(str(target["factory_mac"]))
+    except (KeyError, ValueError) as exc:
+        raise SystemExit("invalid factory MAC in provisioning target") from exc
+    if target.get("provisioning_manifest_sha256") != sha256(provision_manifest):
+        raise SystemExit("target provisioning manifest hash mismatch")
+    if target.get("secure_boot_digest_hex") != provision.get("secure_boot_digest_hex"):
+        raise SystemExit("target Secure Boot digest mismatch")
+    return factory_mac
+
+
+def expected_mac_guard(args: argparse.Namespace, provision_manifest: Path | None = None) -> str | None:
+    manual = getattr(args, "expect_mac", None)
+    target_path = getattr(args, "target_manifest", None)
+    target_mac = None
+    if target_path is not None:
+        if provision_manifest is None:
+            raise SystemExit("--target-manifest requires --manifest")
+        target_mac = verify_target_manifest(target_path, provision_manifest)
+    if manual is not None and target_mac is not None and manual != target_mac:
+        raise SystemExit(f"manual expected MAC {manual} disagrees with target manifest {target_mac}")
+    return target_mac or manual
+
+
 def espefuse_base(*, port: str | None = None, virt_file: Path | None = None) -> list[str]:
     args = [sys.executable, "-m", "espefuse", "--chip", "esp32s3"]
     if port is not None:
@@ -417,8 +470,11 @@ def virtual_provision_command(args: argparse.Namespace) -> None:
             "--virt-file must already exist; initialize/inspect a blank virtual eFuse with preflight first"
         )
     verify_manifest(args.manifest, quiet=True)
+    expected_mac = expected_mac_guard(args, args.manifest)
     expected = expected_provisioning_material(args.manifest)
     state = read_provisioning_state(virt_file=args.virt_file)
+    if expected_mac is not None and expected_mac != state.mac:
+        raise SystemExit(f"expected MAC {expected_mac}, device reports {state.mac}")
     pending = virtual_provisioning_pending_blocks(state, expected)
 
     print("ESP32-S3 virtual key provisioning rehearsal")
@@ -449,6 +505,8 @@ def virtual_provision_command(args: argparse.Namespace) -> None:
     run(command, quiet=True)
 
     after = read_provisioning_state(virt_file=args.virt_file)
+    if after.mac != state.mac:
+        raise SystemExit("device MAC changed during virtual provisioning")
     validate_provisioned_device_state(after, expected)
     print("KEY0/1/3/4 layout:   PASS")
     print("KEY1 read protect:   PASS")
@@ -507,11 +565,13 @@ def validate_secure_device_state(
 
 
 def guarded_provisioning_state(args: argparse.Namespace) -> ProvisioningDeviceState:
-    if args.port is not None and args.expect_mac is None:
-        raise SystemExit("real-device provisioning inspection requires --expect-mac")
+    manifest = getattr(args, "manifest", None)
+    expected_mac = expected_mac_guard(args, manifest)
+    if args.port is not None and expected_mac is None:
+        raise SystemExit("real-device provisioning inspection requires --target-manifest or --expect-mac")
     state = read_provisioning_state(port=args.port, virt_file=args.virt_file)
-    if args.expect_mac is not None and args.expect_mac != state.mac:
-        raise SystemExit(f"expected MAC {args.expect_mac}, device reports {state.mac}")
+    if expected_mac is not None and expected_mac != state.mac:
+        raise SystemExit(f"expected MAC {expected_mac}, device reports {state.mac}")
     return state
 
 
@@ -791,31 +851,40 @@ def main() -> None:
     sub.add_parser("plan", help="show the deterministic key/eFuse ownership plan")
     gen = sub.add_parser("generate", help="generate host-only provisioning material")
     gen.add_argument("--output-dir", type=Path, default=Path("build-provisioning"))
+    bind_target = sub.add_parser("bind-target", help="bind provisioning material to one exact factory MAC")
+    bind_target.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    bind_target.add_argument("--factory-mac", type=mac_argument, required=True)
+    bind_target.add_argument("--output", type=Path, required=True)
     verify = sub.add_parser("verify", help="verify a generated manifest and artifacts")
     verify.add_argument("manifest", type=Path)
     preflight = sub.add_parser("preflight", help="read-only blank-device provisioning preflight")
     preflight_source = preflight.add_mutually_exclusive_group(required=True)
     preflight_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
     preflight_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
-    preflight.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    preflight.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    preflight.add_argument("--target-manifest", type=Path, help="device binding: exact factory MAC plus provisioning-manifest hash")
+    preflight.add_argument("--expect-mac", type=mac_argument, help="manual factory MAC guard; target manifest is preferred")
     verify_device = sub.add_parser("verify-device", help="read-only verification after KEY0/1/3/4 provisioning")
     verify_source = verify_device.add_mutually_exclusive_group(required=True)
     verify_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
     verify_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
     verify_device.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
-    verify_device.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    verify_device.add_argument("--target-manifest", type=Path, help="device binding: exact factory MAC plus provisioning-manifest hash")
+    verify_device.add_argument("--expect-mac", type=mac_argument, help="manual factory MAC guard; target manifest is preferred")
     verify_secure = sub.add_parser("verify-secure", help="read-only verification after Flash Encryption and Secure Boot enablement")
     verify_secure_source = verify_secure.add_mutually_exclusive_group(required=True)
     verify_secure_source.add_argument("--port", help="ESP32-S3 serial port to inspect")
     verify_secure_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
     verify_secure.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
-    verify_secure.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    verify_secure.add_argument("--target-manifest", type=Path, help="device binding: exact factory MAC plus provisioning-manifest hash")
+    verify_secure.add_argument("--expect-mac", type=mac_argument, help="manual factory MAC guard; target manifest is preferred")
     provision_virtual = sub.add_parser(
         "provision-virtual",
         help="rehearse KEY0/1/3/4 provisioning against an espefuse virtual backing file only",
     )
     provision_virtual.add_argument("--virt-file", type=Path, required=True)
     provision_virtual.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    provision_virtual.add_argument("--target-manifest", type=Path, help="device binding checked before any virtual burn")
     provision_virtual.add_argument("--apply", action="store_true", help="write the virtual eFuse backing file")
     secver = sub.add_parser("security-version", help="plan or apply the anti-rollback SECURE_VERSION floor")
     source = secver.add_mutually_exclusive_group(required=True)
@@ -839,6 +908,11 @@ def main() -> None:
         manifest = generate(args.output_dir)
         print(f"generated: {manifest}")
         print(f"secure boot digest: {json.loads(manifest.read_text())['secure_boot_digest_hex']}")
+    elif args.command == "bind-target":
+        target = bind_target_manifest(args.manifest, args.factory_mac, args.output)
+        print(f"target: {target}")
+        print(f"factory MAC: {args.factory_mac}")
+        print(f"provisioning manifest SHA256: {sha256(args.manifest)}")
     elif args.command == "verify":
         verify_manifest(args.manifest)
     elif args.command == "preflight":

@@ -15,6 +15,10 @@ tool=./tools/esp32s3_provision.py
 
 $tool generate --output-dir "$run_dir/material" >/dev/null
 manifest="$run_dir/material/manifest.json"
+target="$run_dir/target.json"
+$tool bind-target --manifest "$manifest" --factory-mac 00:00:00:00:00:00 \
+    --output "$target" >/dev/null
+[[ "$(stat -c %a "$target")" == "600" ]] || fail 'target manifest is not mode 0600'
 
 init_blank() {
     local efuse=$1
@@ -30,24 +34,64 @@ burn_virtual() {
 
 blank="$run_dir/blank.bin"
 init_blank "$blank"
+$tool preflight --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$target" >/dev/null
 before="$(sha256sum "$blank" | awk '{print $1}')"
-$tool provision-virtual --virt-file "$blank" --manifest "$manifest" >"$run_dir/dry-run.txt"
+$tool provision-virtual --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$target" >"$run_dir/dry-run.txt"
 after="$(sha256sum "$blank" | awk '{print $1}')"
 [[ "$before" == "$after" ]] || fail 'dry-run modified virtual eFuse'
 grep -q 'pending blocks:      KEY0, KEY1, KEY3, KEY4' "$run_dir/dry-run.txt"
 grep -q 'virtual write:       no (dry-run)' "$run_dir/dry-run.txt"
 
-$tool provision-virtual --virt-file "$blank" --manifest "$manifest" --apply >"$run_dir/apply.txt"
-$tool verify-device --virt-file "$blank" --manifest "$manifest" >/dev/null
+$tool provision-virtual --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$target" --apply >"$run_dir/apply.txt"
+$tool verify-device --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$target" >/dev/null
 grep -q 'KEY0/1/3/4 layout:   PASS' "$run_dir/apply.txt"
 grep -q 'virtual write:       applied' "$run_dir/apply.txt"
 
 provisioned="$(sha256sum "$blank" | awk '{print $1}')"
-$tool provision-virtual --virt-file "$blank" --manifest "$manifest" --apply >"$run_dir/reapply.txt"
+$tool provision-virtual --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$target" --apply >"$run_dir/reapply.txt"
 reapplied="$(sha256sum "$blank" | awk '{print $1}')"
 [[ "$provisioned" == "$reapplied" ]] || fail 'idempotent reapply modified virtual eFuse'
 grep -q 'pending blocks:      none' "$run_dir/reapply.txt"
 grep -q 'virtual write:       no (already provisioned)' "$run_dir/reapply.txt"
+
+wrong_target="$run_dir/wrong-target.json"
+$tool bind-target --manifest "$manifest" --factory-mac 02:00:00:00:00:01 \
+    --output "$wrong_target" >/dev/null
+wrong_target_before="$(sha256sum "$blank" | awk '{print $1}')"
+set +e
+$tool provision-virtual --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$wrong_target" --apply >"$run_dir/wrong-target.txt" 2>&1
+wrong_target_rc=$?
+set -e
+[[ "$wrong_target_rc" -ne 0 ]] || fail 'wrong target MAC was accepted'
+wrong_target_after="$(sha256sum "$blank" | awk '{print $1}')"
+[[ "$wrong_target_before" == "$wrong_target_after" ]] || fail 'wrong target MAC attempt modified virtual eFuse'
+grep -q 'expected MAC 02:00:00:00:00:01, device reports 00:00:00:00:00:00' "$run_dir/wrong-target.txt"
+
+bad_binding="$run_dir/bad-binding.json"
+cp "$target" "$bad_binding"
+python - "$bad_binding" <<'PY'
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p))
+data['provisioning_manifest_sha256'] = '00' * 32
+open(p, 'w').write(json.dumps(data, indent=2, sort_keys=True) + '\n')
+PY
+bad_binding_before="$(sha256sum "$blank" | awk '{print $1}')"
+set +e
+$tool provision-virtual --virt-file "$blank" --manifest "$manifest" \
+    --target-manifest "$bad_binding" --apply >"$run_dir/bad-binding.txt" 2>&1
+bad_binding_rc=$?
+set -e
+[[ "$bad_binding_rc" -ne 0 ]] || fail 'target with wrong provisioning-manifest hash was accepted'
+bad_binding_after="$(sha256sum "$blank" | awk '{print $1}')"
+[[ "$bad_binding_before" == "$bad_binding_after" ]] || fail 'bad target binding modified virtual eFuse'
+grep -q 'target provisioning manifest hash mismatch' "$run_dir/bad-binding.txt"
 
 recoverable="$run_dir/recoverable.bin"
 init_blank "$recoverable"
@@ -122,6 +166,8 @@ printf 'ESP32-S3 virtual KEY0/KEY1/KEY3/KEY4 provisioning rehearsal: PASS\n'
 printf 'blank dry-run no-write: PASS\n'
 printf 'full virtual burn + verification: PASS\n'
 printf 'idempotent fully-provisioned reapply: PASS\n'
+printf 'exact target-MAC binding + wrong-target refusal: PASS\n'
+printf 'target provisioning-manifest hash binding: PASS\n'
 printf 'recoverable readable-key partial state: PASS\n'
 printf 'unverifiable partial KEY1 refusal: PASS\n'
 printf 'wrong readable key refusal: PASS\n'

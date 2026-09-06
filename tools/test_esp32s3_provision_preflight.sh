@@ -27,7 +27,7 @@ set +e
 missing_mac_rc=$?
 set -e
 [[ "$missing_mac_rc" -ne 0 ]] || fail 'unguarded real-device preflight unexpectedly succeeded'
-grep -q 'real-device provisioning inspection requires --expect-mac' "$run_dir/missing-mac.txt"
+grep -q 'real-device provisioning inspection requires --target-manifest or --expect-mac' "$run_dir/missing-mac.txt"
 ! grep -q 'Could not open' "$run_dir/missing-mac.txt" \
     || fail 'missing MAC guard attempted to open the serial port'
 
@@ -37,7 +37,7 @@ set +e
 secure_missing_mac_rc=$?
 set -e
 [[ "$secure_missing_mac_rc" -ne 0 ]] || fail 'unguarded real-device verify-secure unexpectedly succeeded'
-grep -q 'real-device provisioning inspection requires --expect-mac' "$run_dir/secure-missing-mac.txt"
+grep -q 'real-device provisioning inspection requires --target-manifest or --expect-mac' "$run_dir/secure-missing-mac.txt"
 ! grep -q 'Could not open' "$run_dir/secure-missing-mac.txt" \
     || fail 'verify-secure missing MAC guard attempted to open the serial port'
 
@@ -58,6 +58,7 @@ after="$(sha256sum "$efuse" | awk '{print $1}')"
 printf 'ESP32-S3 provisioning preflight gate: PASS\n'
 printf 'blank KEY0/1/3/4 inspection: PASS\n'
 printf 'real-device expected-MAC guard before port open: PASS\n'
+printf 'persistent target-manifest MAC binding available: PASS\n'
 printf 'preflight/verify-device/verify-secure read-only CLI surface: PASS\n'
 printf 'repeat inspection no-write: PASS\n'
 printf 'SECURE_VERSION apply path not exercised\n'
