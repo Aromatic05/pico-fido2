@@ -9,6 +9,7 @@ import hmac
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -90,6 +91,15 @@ def fido_get_info(hid: socket.socket, cid: bytes) -> bytes:
         raise RuntimeError("CTAP2 authenticatorGetInfo failed")
     if len(response) < 2 or not 0xA0 <= response[1] <= 0xBF:
         raise RuntimeError("CTAP2 authenticatorGetInfo did not return a CBOR map")
+    return response
+
+
+def fido_get_pin_retries(hid: socket.socket, cid: bytes) -> bytes:
+    request = bytes.fromhex("06a201010201")
+    send_frame(hid, hid_init_packet(cid, CTAPHID_CBOR, request))
+    response = recv_hid_message(hid, cid, CTAPHID_CBOR)
+    if response != bytes.fromhex("00a10308"):
+        raise RuntimeError(f"CTAP2 getPINRetries failed: {response.hex()}")
     return response
 
 
@@ -196,6 +206,10 @@ def run_smoke(binary: Path) -> None:
             _, command, init_payload = parse_hid_init(recv_frame(hid))
             if command != CTAPHID_INIT or init_payload[:8] != nonce or len(init_payload) < 17:
                 raise RuntimeError("CTAPHID_INIT failed")
+            if init_payload[13:16] != bytes([5, 7, 0]):
+                raise RuntimeError(
+                    f"CTAPHID_INIT advertised inconsistent firmware version: {init_payload[13:16].hex()}"
+                )
             assigned_cid = init_payload[8:12]
             if assigned_cid in (b"\0" * 4, b"\xff" * 4):
                 raise RuntimeError("invalid assigned CTAPHID CID")
@@ -210,6 +224,9 @@ def run_smoke(binary: Path) -> None:
 
             get_info = fido_get_info(hid, assigned_cid)
             print(f"FIDO2 GetInfo: PASS ({len(get_info) - 1} CBOR bytes)")
+
+            fido_get_pin_retries(hid, assigned_cid)
+            print("FIDO2 getPINRetries without configured PIN: PASS")
 
             send_frame(ccid, piv_version)
             version_after = recv_frame(ccid)
@@ -317,6 +334,13 @@ def run_smoke(binary: Path) -> None:
             if sw != 0x9000:
                 raise RuntimeError(f"HID OATH authentication changed CCID OATH: {sw:04x}")
             print("CCID and HID OATH authentication sessions are independent: PASS")
+        except Exception:
+            if log_path.exists():
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                if log_text:
+                    print("--- emulator log ---", file=sys.stderr)
+                    print(log_text, file=sys.stderr, end="" if log_text.endswith("\n") else "\n")
+            raise
         finally:
             if hid is not None:
                 hid.close()

@@ -38,6 +38,10 @@ release/
 # Compile commands
 compile_commands.json
 
+# Python test artifacts
+__pycache__/
+*.pyc
+
 # ESP-IDF
 sdkconfig
 sdkconfig.old

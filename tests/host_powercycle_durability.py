@@ -23,16 +23,9 @@ try:
     import fido2.hid as fido_hid
     from fido2.ctap2 import Ctap2
     from fido2.ctap2.pin import ClientPin
-    from fido2.hid import CtapHidDevice
-    from fido2.hid import emulation as fido_hid_emulation
+    from fido2.hid import CtapHidConnection, CtapHidDevice, HidDescriptor
 except ImportError as exc:
     raise SystemExit("python-fido2 is required for the HID durability test") from exc
-
-# Select the TCP HID backend explicitly. Do not depend on a patched site-package
-# or on the host OS HID backend chosen by python-fido2.
-fido_hid.list_descriptors = fido_hid_emulation.list_descriptors
-fido_hid.get_descriptor = fido_hid_emulation.get_descriptor
-fido_hid.open_connection = fido_hid_emulation.open_connection
 
 CCID_PORT = 35963
 HID_PORT = 35962
@@ -62,6 +55,49 @@ def send_frame(sock: socket.socket, data: bytes) -> None:
 def recv_frame(sock: socket.socket) -> bytes:
     size = struct.unpack("!H", recv_exact(sock, 2))[0]
     return recv_exact(sock, size)
+
+
+class TcpHidConnection(CtapHidConnection):
+    def __init__(self) -> None:
+        self.sock = socket.create_connection(("127.0.0.1", HID_PORT), timeout=5)
+        self.sock.settimeout(5)
+
+    def read_packet(self) -> bytes:
+        packet = recv_frame(self.sock)
+        if len(packet) != 64:
+            raise RuntimeError(f"unexpected emulator HID packet size: {len(packet)}")
+        return packet
+
+    def write_packet(self, data: bytes) -> None:
+        if len(data) != 64:
+            raise ValueError(f"unexpected CTAPHID packet size: {len(data)}")
+        send_frame(self.sock, data)
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+def tcp_hid_descriptors():
+    yield HidDescriptor(
+        path="tcp://127.0.0.1:35962",
+        vid=0x1050,
+        pid=0x0407,
+        report_size_in=64,
+        report_size_out=64,
+        product_name="YubiKey 5",
+        serial_number=None,
+    )
+
+
+def tcp_hid_open_connection(descriptor: HidDescriptor) -> CtapHidConnection:
+    del descriptor
+    return TcpHidConnection()
+
+
+# Select the product emulator explicitly. This keeps the durability gate on
+# stock python-fido2 while avoiding any host HID backend or patched site-package.
+fido_hid.list_descriptors = tcp_hid_descriptors
+fido_hid.open_connection = tcp_hid_open_connection
 
 
 def apdu(ins: int, p1: int = 0, p2: int = 0, data: bytes = b"") -> bytes:
