@@ -16,6 +16,7 @@ bool picokey_app_policy(const uint8_t *aid, size_t aid_len) {
     static const uint8_t fido[] = {0xA0, 0x00, 0x00, 0x06, 0x47, 0x2F, 0x00, 0x01};
     static const uint8_t fido_backup[] = {0xB0, 0x00, 0x00, 0x06, 0x47, 0x2F, 0x00, 0x01};
     static const uint8_t oath[] = {0xA0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x01};
+    static const uint8_t hsmauth[] = {0xA0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01};
     static const uint8_t management[] = {0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17};
     static const uint8_t openpgp[] = {0xD2, 0x76, 0x00, 0x01, 0x24, 0x01};
     static const uint8_t piv[] = {0xA0, 0x00, 0x00, 0x03, 0x08};
@@ -33,6 +34,9 @@ bool picokey_app_policy(const uint8_t *aid, size_t aid_len) {
     }
     if (aid_equal(aid, aid_len, oath, sizeof(oath))) {
         return cap_supported(CAP_OATH);
+    }
+    if (aid_equal(aid, aid_len, hsmauth, sizeof(hsmauth))) {
+        return cap_supported(CAP_HSMAUTH);
     }
     if (aid_equal(aid, aid_len, management, sizeof(management))) {
         return cap_supported(CAP_MANAGEMENT);
