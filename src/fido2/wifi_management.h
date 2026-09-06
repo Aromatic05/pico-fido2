@@ -22,6 +22,12 @@ esp_err_t fido_wifi_management_set_enabled(
     bool unlock_present,
     uint16_t *status_word,
     fido_wifi_management_state_t *state);
+esp_err_t fido_wifi_management_set_lock(
+    const uint8_t unlock[MAN_CONFIG_LOCK_LEN],
+    bool unlock_present,
+    const uint8_t new_lock[MAN_CONFIG_LOCK_LEN],
+    uint16_t *status_word,
+    fido_wifi_management_state_t *state);
 esp_err_t fido_wifi_management_allow_ble_pairing(void);
 void fido_wifi_management_task(void);
 

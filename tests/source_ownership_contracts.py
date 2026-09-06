@@ -184,6 +184,7 @@ def verify_wifi_commissioning() -> None:
     event = function_body(source, "wifi_event_handler")
     ble_stop = function_body(ble, "fido_ble_stop_for_commissioning")
     config_post = function_body(source, "config_post")
+    lock_post = function_body(source, "config_lock_post")
     pairing_post = function_body(source, "ble_pairing_post")
     reboot_post = function_body(source, "reboot_post")
     grant_presence = function_body(source, "grant_physical_presence")
@@ -217,6 +218,10 @@ def verify_wifi_commissioning() -> None:
             "persistent USB application changes must consume one physical BOOT confirmation")
     require("consume_physical_presence()" in pairing_post,
             "BLE trust changes must consume one physical BOOT confirmation")
+    require("consume_physical_presence()" in lock_post,
+            "configuration-lock changes must consume one physical BOOT confirmation")
+    require("csrf_valid(req)" in lock_post,
+            "configuration-lock changes must require the commissioning CSRF token")
     require("consume_physical_presence()" not in reboot_post,
             "non-persistent maintenance reboot must not consume the mutation confirmation")
     for label, body in (("grant", grant_presence), ("consume", consume_presence)):
@@ -224,8 +229,31 @@ def verify_wifi_commissioning() -> None:
                 "portEXIT_CRITICAL(&presence_mux)" in body,
                 f"Wi-Fi physical presence {label} must serialize core0 and HTTP task access")
     require("428 Precondition Required" in config_post and
-            "428 Precondition Required" in pairing_post,
+            "428 Precondition Required" in pairing_post and
+            "428 Precondition Required" in lock_post,
             "mutating maintenance APIs must fail closed when physical confirmation is absent")
+    require("mbedtls_platform_zeroize(unlock" in config_post,
+            "USB configuration unlock material must be zeroized after use")
+    require("mbedtls_platform_zeroize(unlock" in lock_post and
+            "mbedtls_platform_zeroize(new_lock" in lock_post,
+            "configuration-lock old/new material must be zeroized after use")
+
+    management = text(WIFI_MANAGEMENT)
+    transact = function_body(management, "transact")
+    management_init = function_body(management, "fido_wifi_management_init")
+    management_task = function_body(management, "fido_wifi_management_task")
+    require("xSemaphoreCreateMutex()" in management_init,
+            "Wi-Fi management must serialize HTTP request/response transactions")
+    require("xSemaphoreTake(transaction_mutex" in transact and
+            "xSemaphoreGive(transaction_mutex)" in transact,
+            "Wi-Fi management transaction mutex must cover queue send/response receive")
+    require("WIFI_MANAGEMENT_SET_LOCK" in management_task and
+            "write_lock(&request)" in management_task,
+            "configuration-lock writes must execute through the core0 management task")
+    before(management_task, "card_try_claim_maintenance()", "write_lock(&request)",
+           "configuration-lock writes must claim the global maintenance owner first")
+    before(management_task, "write_lock(&request)", "do_flash()",
+           "configuration-lock writes must use the durable core0 flash barrier")
     for assignment in (
         "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
         "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12",

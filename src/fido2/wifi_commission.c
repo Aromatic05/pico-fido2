@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/constant_time.h"
+#include "mbedtls/platform_util.h"
 
 #include "fido/management.h"
 #include "fido/version.h"
@@ -82,8 +83,10 @@ static bool csrf_valid(httpd_req_t *req) {
     if (httpd_req_get_hdr_value_str(req, "X-Pico-CSRF", header, sizeof(header)) != ESP_OK) {
         return false;
     }
-    return strlen(header) == sizeof(csrf_token) - 1 &&
-           mbedtls_ct_memcmp(header, csrf_token, sizeof(csrf_token) - 1) == 0;
+    bool valid = strlen(header) == sizeof(csrf_token) - 1 &&
+                 mbedtls_ct_memcmp(header, csrf_token, sizeof(csrf_token) - 1) == 0;
+    mbedtls_platform_zeroize(header, sizeof(header));
+    return valid;
 }
 
 static void grant_physical_presence(void) {
@@ -109,16 +112,21 @@ static const char index_html[] =
     "button{cursor:pointer;margin-right:8px}.muted{color:#999}.bad{color:#ff8b8b}.ok{color:#8bd49c}code{font-family:ui-monospace,monospace}</style></head><body>"
     "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Physical commissioning mode. Persistent or trust-changing actions require one BOOT press immediately before the action.</p>"
     "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
-    "<div class=card><h2>USB applications</h2><div id=apps></div>"
-    "<div id=unlockRow style='display:none'><label>Configuration lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
-    "<p id=msg class=muted></p><button onclick=save()>Save configuration</button><button onclick=pairBle()>Allow BLE pairing</button><button onclick=reboot()>Restart device</button></div>"
-    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),msgBox=document.getElementById('msg');"
+    "<div class=card><h2>USB applications</h2><div id=apps></div><button onclick=save()>Save configuration</button></div>"
+    "<div class=card><h2>Configuration lock</h2><p id=lockState class=muted></p>"
+    "<div id=unlockRow style='display:none'><label>Current lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
+    "<label>New lock code (32 hex)<br><input id=newLock maxlength=32 autocomplete=off></label>"
+    "<label>Confirm new lock code<br><input id=confirmLock maxlength=32 autocomplete=off></label>"
+    "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
+    "<div class=card><h2>Maintenance actions</h2><button onclick=pairBle()>Allow BLE pairing</button><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
+    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
-    "lockRow.style.display=c.locked?'block':'none';msgBox.textContent=c.locked?'Configuration is locked; the existing 16-byte lock code is required to save.':'Configuration is unlocked.'}"
+    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.'}"
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
     "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
-    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.';await load()}"
+    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}unlockInput.value='';await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
+    "async function changeLock(clear){const p=new URLSearchParams();if(cfg.locked)p.set('unlock',unlockInput.value.trim());if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}unlockInput.value='';newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
     "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
     "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
@@ -211,26 +219,37 @@ static int hex_nibble(char c) {
     return -1;
 }
 
-static bool parse_unlock(const char *body, uint8_t unlock[MAN_CONFIG_LOCK_LEN],
-                         bool *present) {
+static bool parse_lock_parameter(const char *body, const char *key,
+                                 uint8_t lock[MAN_CONFIG_LOCK_LEN], bool *present) {
     char value[MAN_CONFIG_LOCK_LEN * 2 + 1];
-    if (httpd_query_key_value(body, "unlock", value, sizeof(value)) != ESP_OK) {
+    if (httpd_query_key_value(body, key, value, sizeof(value)) != ESP_OK) {
         *present = false;
         return true;
     }
     if (strlen(value) != MAN_CONFIG_LOCK_LEN * 2) {
+        mbedtls_platform_zeroize(value, sizeof(value));
         return false;
     }
     for (size_t i = 0; i < MAN_CONFIG_LOCK_LEN; ++i) {
         int high = hex_nibble(value[i * 2]);
         int low = hex_nibble(value[i * 2 + 1]);
         if (high < 0 || low < 0) {
+            mbedtls_platform_zeroize(value, sizeof(value));
             return false;
         }
-        unlock[i] = (uint8_t)((high << 4) | low);
+        lock[i] = (uint8_t)((high << 4) | low);
     }
+    mbedtls_platform_zeroize(value, sizeof(value));
     *present = true;
     return true;
+}
+
+static bool lock_all_zero(const uint8_t lock[MAN_CONFIG_LOCK_LEN]) {
+    uint8_t combined = 0;
+    for (size_t i = 0; i < MAN_CONFIG_LOCK_LEN; ++i) {
+        combined |= lock[i];
+    }
+    return combined == 0;
 }
 
 static esp_err_t config_post(httpd_req_t *req) {
@@ -240,16 +259,22 @@ static esp_err_t config_post(httpd_req_t *req) {
     }
     char body[128];
     if (read_form_body(req, body, sizeof(body)) != ESP_OK) {
+        mbedtls_platform_zeroize(body, sizeof(body));
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid request body\"}");
     }
 
     uint16_t enabled = 0;
     uint8_t unlock[MAN_CONFIG_LOCK_LEN] = {0};
     bool unlock_present = false;
-    if (!parse_enabled(body, &enabled) || !parse_unlock(body, unlock, &unlock_present)) {
+    if (!parse_enabled(body, &enabled) ||
+        !parse_lock_parameter(body, "unlock", unlock, &unlock_present)) {
+        mbedtls_platform_zeroize(body, sizeof(body));
+        mbedtls_platform_zeroize(unlock, sizeof(unlock));
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid configuration\"}");
     }
+    mbedtls_platform_zeroize(body, sizeof(body));
     if (!consume_physical_presence()) {
+        mbedtls_platform_zeroize(unlock, sizeof(unlock));
         return json_response(req, "428 Precondition Required",
                              "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
     }
@@ -258,6 +283,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     fido_wifi_management_state_t state;
     esp_err_t err = fido_wifi_management_set_enabled(
         enabled, unlock, unlock_present, &status_word, &state);
+    mbedtls_platform_zeroize(unlock, sizeof(unlock));
     if (err != ESP_OK) {
         return management_transport_error(req, err);
     }
@@ -273,6 +299,63 @@ static esp_err_t config_post(httpd_req_t *req) {
              "{\"ok\":true,\"enabled\":%u,\"locked\":%s,\"restartRequired\":true}",
              state.enabled, state.locked ? "true" : "false");
     return json_response(req, "200 OK", response);
+}
+
+static esp_err_t config_lock_post(httpd_req_t *req) {
+    touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
+
+    char body[192];
+    if (read_form_body(req, body, sizeof(body)) != ESP_OK) {
+        mbedtls_platform_zeroize(body, sizeof(body));
+        return json_response(req, "400 Bad Request", "{\"error\":\"invalid request body\"}");
+    }
+
+    uint8_t unlock[MAN_CONFIG_LOCK_LEN] = {0};
+    uint8_t new_lock[MAN_CONFIG_LOCK_LEN] = {0};
+    bool unlock_present = false;
+    bool new_lock_present = false;
+    char clear_value[4] = {0};
+    bool clear = httpd_query_key_value(body, "clear", clear_value,
+                                       sizeof(clear_value)) == ESP_OK &&
+                 strcmp(clear_value, "1") == 0;
+    bool parsed = parse_lock_parameter(body, "unlock", unlock, &unlock_present) &&
+                  parse_lock_parameter(body, "new", new_lock, &new_lock_present);
+    mbedtls_platform_zeroize(body, sizeof(body));
+    if (!parsed || clear == new_lock_present ||
+        (new_lock_present && lock_all_zero(new_lock))) {
+        mbedtls_platform_zeroize(unlock, sizeof(unlock));
+        mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
+        return json_response(req, "400 Bad Request", "{\"error\":\"invalid lock update\"}");
+    }
+    if (!consume_physical_presence()) {
+        mbedtls_platform_zeroize(unlock, sizeof(unlock));
+        mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
+        return json_response(req, "428 Precondition Required",
+                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
+    }
+
+    uint16_t status_word = 0;
+    fido_wifi_management_state_t state;
+    esp_err_t err = fido_wifi_management_set_lock(
+        unlock, unlock_present, new_lock, &status_word, &state);
+    mbedtls_platform_zeroize(unlock, sizeof(unlock));
+    mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
+    if (err != ESP_OK) {
+        return management_transport_error(req, err);
+    }
+    if (status_word == MAN_SW_SECURITY_STATUS_NOT_SATISFIED) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"configuration lock rejected\"}");
+    }
+    if (status_word != MAN_SW_OK) {
+        return json_response(req, "400 Bad Request", "{\"error\":\"lock update rejected\"}");
+    }
+
+    return json_response(req, "200 OK",
+                         state.locked ? "{\"ok\":true,\"locked\":true}" :
+                                        "{\"ok\":true,\"locked\":false}");
 }
 
 static esp_err_t reboot_post(httpd_req_t *req) {
@@ -318,7 +401,7 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 6;
+    config.max_uri_handlers = 7;
     config.backlog_conn = 1;
     esp_err_t err = httpd_start(&http_server, &config);
     if (err != ESP_OK) {
@@ -330,6 +413,7 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
+        {.uri = "/api/config/lock", .method = HTTP_POST, .handler = config_lock_post},
         {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
     };

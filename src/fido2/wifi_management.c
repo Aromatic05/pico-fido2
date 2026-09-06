@@ -6,17 +6,21 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "mbedtls/platform_util.h"
 
 #include "pico_keys.h"
 #include "usb.h"
 #include "wifi_management.h"
+#include "wifi_management_wire.h"
 #if CONFIG_PICO_FIDO2_BLE
 #include "ble_fido.h"
 #endif
 
 typedef enum {
     WIFI_MANAGEMENT_READ,
-    WIFI_MANAGEMENT_WRITE,
+    WIFI_MANAGEMENT_SET_ENABLED,
+    WIFI_MANAGEMENT_SET_LOCK,
     WIFI_MANAGEMENT_ALLOW_BLE_PAIRING,
 } wifi_management_operation_t;
 
@@ -26,6 +30,7 @@ typedef struct {
     uint16_t enabled;
     bool unlock_present;
     uint8_t unlock[MAN_CONFIG_LOCK_LEN];
+    uint8_t new_lock[MAN_CONFIG_LOCK_LEN];
 } wifi_management_request_t;
 
 typedef struct {
@@ -37,6 +42,7 @@ typedef struct {
 
 static QueueHandle_t request_queue;
 static QueueHandle_t response_queue;
+static SemaphoreHandle_t transaction_mutex;
 static uint32_t request_id;
 
 static esp_err_t read_state(fido_wifi_management_state_t *state) {
@@ -47,33 +53,43 @@ static esp_err_t read_state(fido_wifi_management_state_t *state) {
         &state->locked) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+static void clear_request_secrets(wifi_management_request_t *request) {
+    mbedtls_platform_zeroize(request->unlock, sizeof(request->unlock));
+    mbedtls_platform_zeroize(request->new_lock, sizeof(request->new_lock));
+}
+
 static uint16_t write_enabled(const wifi_management_request_t *request) {
-    uint8_t wire[1 + 2 + 2 + 2 + MAN_CONFIG_LOCK_LEN];
-    uint16_t offset = 1;
+    uint8_t wire[64] = {0};
+    size_t len = fido_wifi_build_enabled_config(
+        wire, sizeof(wire), request->enabled, request->unlock,
+        request->unlock_present);
+    uint16_t status = len > 0 ? man_write_config(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
+    mbedtls_platform_zeroize(wire, sizeof(wire));
+    return status;
+}
 
-    wire[offset++] = TAG_USB_ENABLED;
-    wire[offset++] = 2;
-    wire[offset++] = (uint8_t)(request->enabled >> 8);
-    wire[offset++] = (uint8_t)request->enabled;
-
-    if (request->unlock_present) {
-        wire[offset++] = TAG_UNLOCK;
-        wire[offset++] = MAN_CONFIG_LOCK_LEN;
-        memcpy(wire + offset, request->unlock, MAN_CONFIG_LOCK_LEN);
-        offset = (uint16_t)(offset + MAN_CONFIG_LOCK_LEN);
-    }
-
-    wire[0] = (uint8_t)(offset - 1);
-    return man_write_config(wire, offset);
+static uint16_t write_lock(const wifi_management_request_t *request) {
+    uint8_t wire[64] = {0};
+    size_t len = fido_wifi_build_lock_config(
+        wire, sizeof(wire), request->unlock, request->unlock_present,
+        request->new_lock);
+    uint16_t status = len > 0 ? man_write_config(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
+    mbedtls_platform_zeroize(wire, sizeof(wire));
+    return status;
 }
 
 static esp_err_t transact(const wifi_management_request_t *request,
                           wifi_management_response_t *response) {
-    if (request_queue == NULL || response_queue == NULL) {
+    if (request_queue == NULL || response_queue == NULL || transaction_mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xQueueSend(request_queue, request, pdMS_TO_TICKS(100)) != pdPASS) {
+    if (xSemaphoreTake(transaction_mutex, pdMS_TO_TICKS(5000)) != pdPASS) {
         return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t result = ESP_ERR_TIMEOUT;
+    if (xQueueSend(request_queue, request, pdMS_TO_TICKS(100)) != pdPASS) {
+        goto done;
     }
 
     TickType_t start = xTaskGetTickCount();
@@ -82,19 +98,25 @@ static esp_err_t transact(const wifi_management_request_t *request,
         TickType_t elapsed = xTaskGetTickCount() - start;
         TickType_t remaining = timeout - elapsed;
         if (xQueueReceive(response_queue, response, remaining) != pdPASS) {
-            return ESP_ERR_TIMEOUT;
+            break;
         }
         if (response->id == request->id) {
-            return response->result;
+            result = response->result;
+            break;
         }
     }
-    return ESP_ERR_TIMEOUT;
+
+done:
+    xSemaphoreGive(transaction_mutex);
+    return result;
 }
 
 esp_err_t fido_wifi_management_init(void) {
     request_queue = xQueueCreate(1, sizeof(wifi_management_request_t));
     response_queue = xQueueCreate(1, sizeof(wifi_management_response_t));
-    return request_queue != NULL && response_queue != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+    transaction_mutex = xSemaphoreCreateMutex();
+    return request_queue != NULL && response_queue != NULL && transaction_mutex != NULL
+        ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t fido_wifi_management_get_state(fido_wifi_management_state_t *state) {
@@ -124,7 +146,7 @@ esp_err_t fido_wifi_management_set_enabled(
     }
     wifi_management_request_t request = {
         .id = __atomic_add_fetch(&request_id, 1, __ATOMIC_RELAXED),
-        .operation = WIFI_MANAGEMENT_WRITE,
+        .operation = WIFI_MANAGEMENT_SET_ENABLED,
         .enabled = enabled,
         .unlock_present = unlock_present,
     };
@@ -134,6 +156,37 @@ esp_err_t fido_wifi_management_set_enabled(
 
     wifi_management_response_t response = {0};
     esp_err_t err = transact(&request, &response);
+    clear_request_secrets(&request);
+    if (err == ESP_OK) {
+        *status_word = response.status_word;
+        *state = response.state;
+    }
+    return err;
+}
+
+esp_err_t fido_wifi_management_set_lock(
+    const uint8_t unlock[MAN_CONFIG_LOCK_LEN],
+    bool unlock_present,
+    const uint8_t new_lock[MAN_CONFIG_LOCK_LEN],
+    uint16_t *status_word,
+    fido_wifi_management_state_t *state) {
+    if (new_lock == NULL || status_word == NULL || state == NULL ||
+        (unlock_present && unlock == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    wifi_management_request_t request = {
+        .id = __atomic_add_fetch(&request_id, 1, __ATOMIC_RELAXED),
+        .operation = WIFI_MANAGEMENT_SET_LOCK,
+        .unlock_present = unlock_present,
+    };
+    if (unlock_present) {
+        memcpy(request.unlock, unlock, MAN_CONFIG_LOCK_LEN);
+    }
+    memcpy(request.new_lock, new_lock, MAN_CONFIG_LOCK_LEN);
+
+    wifi_management_response_t response = {0};
+    esp_err_t err = transact(&request, &response);
+    clear_request_secrets(&request);
     if (err == ESP_OK) {
         *status_word = response.status_word;
         *state = response.state;
@@ -168,25 +221,40 @@ void fido_wifi_management_task(void) {
 
     if (!card_try_claim_maintenance()) {
         response.result = ESP_ERR_INVALID_STATE;
+        clear_request_secrets(&request);
         xQueueOverwrite(response_queue, &response);
         return;
     }
 
-    if (request.operation == WIFI_MANAGEMENT_WRITE) {
-        response.status_word = write_enabled(&request);
-        if (response.status_word == MAN_SW_OK && low_flash_is_pending()) {
-            do_flash();
-            if (low_flash_is_pending()) {
-                response.result = ESP_FAIL;
-            }
-        }
-    }
-    else if (request.operation == WIFI_MANAGEMENT_ALLOW_BLE_PAIRING) {
+    bool config_write = false;
+    switch (request.operation) {
+        case WIFI_MANAGEMENT_READ:
+            break;
+        case WIFI_MANAGEMENT_SET_ENABLED:
+            response.status_word = write_enabled(&request);
+            config_write = true;
+            break;
+        case WIFI_MANAGEMENT_SET_LOCK:
+            response.status_word = write_lock(&request);
+            config_write = true;
+            break;
+        case WIFI_MANAGEMENT_ALLOW_BLE_PAIRING:
 #if CONFIG_PICO_FIDO2_BLE
-        response.result = fido_ble_schedule_pairing_window();
+            response.result = fido_ble_schedule_pairing_window();
 #else
-        response.result = ESP_ERR_NOT_SUPPORTED;
+            response.result = ESP_ERR_NOT_SUPPORTED;
 #endif
+            break;
+        default:
+            response.result = ESP_ERR_INVALID_ARG;
+            break;
+    }
+
+    if (config_write && response.status_word == MAN_SW_OK && low_flash_is_pending()) {
+        do_flash();
+        if (low_flash_is_pending()) {
+            response.result = ESP_FAIL;
+        }
     }
 
     if (response.result == ESP_OK && read_state(&response.state) != ESP_OK) {
@@ -194,6 +262,7 @@ void fido_wifi_management_task(void) {
     }
 
     card_release_maintenance();
+    clear_request_secrets(&request);
     xQueueOverwrite(response_queue, &response);
 }
 
