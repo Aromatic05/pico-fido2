@@ -14,6 +14,7 @@ git diff --check
 cmake -S . -B build-host -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-host -j2
 python tests/host_protocol_smoke.py build-host/pico_fido2
+python tests/host_hsmauth.py build-host/pico_fido2
 python tests/host_transport_contention.py build-host/pico_fido2 --iterations 50
 
 cmake -S . -B build-host-analyzer \
@@ -39,6 +40,8 @@ cmake -S . -B build-host-asan \
 cmake --build build-host-asan -j2
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
     python tests/host_protocol_smoke.py build-host-asan/pico_fido2
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    python tests/host_hsmauth.py build-host-asan/pico_fido2
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
     python tests/host_transport_contention.py build-host-asan/pico_fido2 --iterations 30
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
@@ -89,6 +92,8 @@ cmake -S . -B build-host-tsan \
 cmake --build build-host-tsan -j2
 TSAN_OPTIONS=halt_on_error=1 \
     python tests/host_protocol_smoke.py build-host-tsan/pico_fido2
+TSAN_OPTIONS=halt_on_error=1 \
+    python tests/host_hsmauth.py build-host-tsan/pico_fido2
 TSAN_OPTIONS=halt_on_error=1 \
     python tests/host_transport_contention.py build-host-tsan/pico_fido2 --iterations 30
 TSAN_OPTIONS=halt_on_error=1 \

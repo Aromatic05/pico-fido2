@@ -106,6 +106,7 @@ list(APPEND SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/cbor_vendor.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/cbor_large_blobs.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/management.c
+    ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/hsm_auth.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/defs.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/openpgp.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/piv.c
