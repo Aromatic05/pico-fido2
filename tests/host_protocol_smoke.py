@@ -201,6 +201,16 @@ def run_smoke(binary: Path) -> None:
             if not version_before.endswith(b"\x90\x00"):
                 raise RuntimeError(f"PIV VERSION before HID failed: {version_before.hex()}")
 
+            for ref, label in ((0x80, "PIN"), (0x81, "PUK")):
+                metadata, sw = raw_apdu(ccid, bytes([0x00, 0xF7, 0x00, ref]))
+                if sw != 0x9000:
+                    raise RuntimeError(f"PIV {label} GET_METADATA failed: {sw:04x}")
+                if tlv_value(metadata, 0x05) != b"\x01":
+                    raise RuntimeError(f"PIV {label} default metadata is inconsistent: {metadata.hex()}")
+                if tlv_value(metadata, 0x06) != b"\x03\x03":
+                    raise RuntimeError(f"PIV {label} retry metadata is inconsistent: {metadata.hex()}")
+            print("PIV PIN/PUK GET_METADATA: PASS")
+
             nonce = bytes.fromhex("0011223344556677")
             send_frame(hid, hid_init_packet(b"\xff" * 4, CTAPHID_INIT, nonce))
             _, command, init_payload = parse_hid_init(recv_frame(hid))

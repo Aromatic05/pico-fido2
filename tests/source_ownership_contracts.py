@@ -529,6 +529,7 @@ def verify_otp_hid_adapter() -> None:
 
 def verify_piv_slot_storage() -> None:
     source = text(PIV)
+    x509_create = function_body(source, "x509_create_cert")
     get_metadata = function_body(source, "cmd_get_metadata")
     authenticate = function_body(source, "cmd_authenticate")
     keygen = function_body(source, "cmd_asym_keygen")
@@ -541,6 +542,16 @@ def verify_piv_slot_storage() -> None:
     )
     require("piv_key_storage_fid" in get_metadata,
             "PIV GET_METADATA must resolve the logical slot through storage mapping")
+    require("key_ref == EF_PIV_PIN || key_ref == EF_PIV_PUK" in get_metadata and
+            "? key_ref" in get_metadata,
+            "PIV PIN/PUK GET_METADATA must preserve their full 16-bit file identifiers")
+    require("while (serial_offset + 1 < sizeof(serial) && serial[serial_offset] == 0)" in x509_create,
+            "PIV X.509 serials must strip random leading zero octets before DER INTEGER encoding")
+    require("serial[serial_offset] = 1" in x509_create,
+            "PIV X.509 serial generation must turn the all-zero value into a positive non-zero INTEGER")
+    require("serial + serial_offset" in x509_create and
+            "sizeof(serial) - serial_offset" in x509_create,
+            "PIV X.509 serial writer must receive the canonicalized serial span")
     require(authenticate.count("piv_key_storage_fid(key_ref)") >= 3,
             "PIV authenticate/ECDH paths must resolve private-key storage through one mapping")
     require("piv_key_storage_fid(key_ref)" in keygen,
