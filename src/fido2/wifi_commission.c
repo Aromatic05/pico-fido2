@@ -7,12 +7,17 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
+#include "esp_flash_encrypt.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_pm.h"
 #include "esp_random.h"
+#include "esp_secure_boot.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -141,12 +146,30 @@ static esp_err_t index_get(httpd_req_t *req) {
 
 static esp_err_t status_get(httpd_req_t *req) {
     touch_activity();
-    char body[448];
+    esp_pm_config_t pm = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 80,
+        .light_sleep_enable = false,
+    };
+    bool pm_readback = esp_pm_get_configuration(&pm) == ESP_OK;
+    unsigned secure_version = esp_efuse_read_secure_version();
+    bool secure_boot = esp_secure_boot_enabled();
+    bool flash_encryption = esp_flash_encryption_enabled();
+    bool rom_download = !esp_efuse_read_field_bit(ESP_EFUSE_DIS_DOWNLOAD_MODE);
+    bool usb_download = !esp_efuse_read_field_bit(
+        ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE);
+
+    char body[768];
     int len = snprintf(body, sizeof(body),
         "{\"device\":\"Pico FIDO2\",\"platform\":\"ESP32-S3\","
         "\"version\":\"%u.%u\",\"ssid\":\"%s\","
         "\"ble\":%s,\"devKeys\":%s,\"idleTimeoutSec\":%u,"
-        "\"freeHeap\":%u,\"largestInternal\":%u}",
+        "\"freeHeap\":%u,\"largestInternal\":%u,"
+        "\"security\":{\"secureBoot\":%s,\"flashEncryption\":%s,"
+        "\"secureVersion\":%u,\"romDownload\":%s,"
+        "\"usbSerialJtagDownload\":%s},"
+        "\"power\":{\"pmReadback\":%s,\"minCpuMHz\":%d,"
+        "\"maxCpuMHz\":%d,\"lightSleep\":%s}}",
         PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR, softap_ssid,
 #if CONFIG_PICO_FIDO2_BLE
         fido_ble_is_running() ? "true" : "false",
@@ -160,7 +183,20 @@ static esp_err_t status_get(httpd_req_t *req) {
 #endif
         (unsigned)CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC,
         (unsigned)esp_get_free_heap_size(),
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        secure_boot ? "true" : "false",
+        flash_encryption ? "true" : "false",
+        secure_version,
+        rom_download ? "true" : "false",
+        usb_download ? "true" : "false",
+        pm_readback ? "true" : "false",
+        pm.min_freq_mhz,
+        pm.max_freq_mhz,
+        pm.light_sleep_enable ? "true" : "false");
+    if (len < 0 || (size_t)len >= sizeof(body)) {
+        return json_response(req, "500 Internal Server Error",
+                             "{\"error\":\"status encoding overflow\"}");
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, body, len);

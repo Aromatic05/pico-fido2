@@ -188,6 +188,7 @@ def verify_wifi_commissioning() -> None:
     pairing_post = function_body(source, "ble_pairing_post")
     bond_reset_post = function_body(source, "ble_bond_reset_post")
     reboot_post = function_body(source, "reboot_post")
+    status_get = function_body(source, "status_get")
     grant_presence = function_body(source, "grant_physical_presence")
     consume_presence = function_body(source, "consume_physical_presence")
 
@@ -213,8 +214,22 @@ def verify_wifi_commissioning() -> None:
             "BLE advertising pause must be an explicit transport state, not a one-shot side effect")
     require("if (!fido_ble_is_running())" in function_body(ble, "fido_ble_task"),
             "BLE transport task must remain quiescent after commissioning deinitializes NimBLE")
-    require("fido_ble_is_running() ? \"true\" : \"false\"" in function_body(source, "status_get"),
+    require("fido_ble_is_running() ? \"true\" : \"false\"" in status_get,
             "commissioning status must report the runtime BLE state rather than compile-time capability")
+    require("esp_secure_boot_enabled()" in status_get and
+            "esp_flash_encryption_enabled()" in status_get and
+            "esp_efuse_read_secure_version()" in status_get,
+            "maintenance status must use public ESP-IDF read-only security-state APIs")
+    require("ESP_EFUSE_DIS_DOWNLOAD_MODE" in status_get and
+            "ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" in status_get,
+            "maintenance status must expose both retained ROM recovery paths")
+    require("esp_pm_get_configuration(&pm)" in status_get and
+            '\\"minCpuMHz\\"' in status_get and '\\"maxCpuMHz\\"' in status_get and
+            '\\"lightSleep\\"' in status_get,
+            "maintenance status must expose configured DFS/light-sleep bounds")
+    for secret_marker in ("BLOCK_KEY", "KEY_PURPOSE", "flash_encryption_key", "mkek", "device_key"):
+        require(secret_marker not in status_get,
+                f"maintenance status must not expose provisioning/key material: {secret_marker}")
     require("consume_physical_presence()" in config_post,
             "persistent USB application changes must consume one physical BOOT confirmation")
     require("consume_physical_presence()" in pairing_post,
