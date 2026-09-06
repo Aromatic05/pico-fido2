@@ -7,6 +7,7 @@ if(CONFIG_PICO_FIDO2_BLE)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/ble_fido.c
         ${CMAKE_CURRENT_LIST_DIR}/ble_fido_frame.c
+        ${CMAKE_CURRENT_LIST_DIR}/ble_pairing_policy.c
     )
 endif()
 

@@ -95,7 +95,7 @@ static const char index_html[] =
     "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
     "<div class=card><h2>USB applications</h2><div id=apps></div>"
     "<div id=unlockRow style='display:none'><label>Configuration lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
-    "<p id=msg class=muted></p><button onclick=save()>Save configuration</button><button onclick=reboot()>Restart device</button></div>"
+    "<p id=msg class=muted></p><button onclick=save()>Save configuration</button><button onclick=pairBle()>Allow BLE pairing</button><button onclick=reboot()>Restart device</button></div>"
     "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),msgBox=document.getElementById('msg');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
@@ -103,6 +103,7 @@ static const char index_html[] =
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
     "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
     "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.';await load()}"
+    "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
     "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
@@ -266,6 +267,26 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     return err;
 }
 
+static esp_err_t ble_pairing_post(httpd_req_t *req) {
+    touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
+    esp_err_t err = fido_wifi_management_allow_ble_pairing();
+    if (err != ESP_OK) {
+        return management_transport_error(req, err);
+    }
+    char response[64];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"pairingWindowSec\":%u}",
+             (unsigned)CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
+    err = json_response(req, "202 Accepted", response);
+    if (err == ESP_OK) {
+        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    }
+    return err;
+}
+
 static esp_err_t start_http_server(void) {
     if (http_server != NULL) {
         return ESP_OK;
@@ -273,7 +294,7 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 5;
+    config.max_uri_handlers = 6;
     config.backlog_conn = 1;
     esp_err_t err = httpd_start(&http_server, &config);
     if (err != ESP_OK) {
@@ -285,6 +306,7 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
+        {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {

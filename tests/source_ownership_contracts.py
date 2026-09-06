@@ -19,7 +19,9 @@ EMULATION = SDK / "usb" / "emulation" / "emulation.c"
 LED = SDK / "led" / "led.c"
 BLE = ROOT / "src" / "fido2" / "ble_fido.c"
 WIFI_COMMISSION = ROOT / "src" / "fido2" / "wifi_commission.c"
+WIFI_MANAGEMENT = ROOT / "src" / "fido2" / "wifi_management.c"
 WIFI_DEFAULTS = ROOT / "sdkconfig.wifi.defaults"
+BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
 CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
@@ -549,6 +551,50 @@ def verify_ble_adapter() -> None:
     )
 
 
+def verify_ble_pairing_security() -> None:
+    source = text(BLE)
+    gap = function_body(source, "fido_ble_gap_event")
+    access = function_body(source, "fido_ble_access")
+    init = function_body(source, "fido_ble_init")
+    schedule = function_body(source, "fido_ble_schedule_pairing_window")
+    wifi_management = text(WIFI_MANAGEMENT)
+    wifi_task = function_body(wifi_management, "fido_wifi_management_task")
+    wifi_allow = function_body(wifi_management, "fido_wifi_management_allow_ble_pairing")
+    defaults = text(BLE_DEFAULTS)
+
+    require("CONFIG_BT_NIMBLE_NVS_PERSIST=y" in defaults,
+            "BLE security must persist bond records across reboot")
+    require("fido_ble_pairing_access_allowed(&pairing_policy)" in access,
+            "FIDO GATT access must fail closed until the connection is pairing-authorized")
+    require("BLE_ATT_ERR_INSUFFICIENT_AUTHOR" in access,
+            "unauthorized BLE FIDO access must return an explicit ATT authorization failure")
+    require("fido_ble_peer_is_bonded" in gap and
+            "fido_ble_pairing_on_connect(&pairing_policy, known_bond)" in gap,
+            "BLE reconnect authorization must be derived from the persistent bond store")
+    require("fido_ble_pairing_repeat_allowed" in gap,
+            "repeat pairing must require the same physical pairing window as a fresh bond")
+    require("BLE_GAP_EVENT_PARING_COMPLETE" in gap and
+            "BLE_GAP_EVENT_ENC_CHANGE" in gap,
+            "fresh-pair rejection must track NimBLE pairing completion through post-persist encryption change")
+    pairing_pos = gap.find("case BLE_GAP_EVENT_PARING_COMPLETE")
+    enc_pos = gap.find("case BLE_GAP_EVENT_ENC_CHANGE")
+    delete_pos = gap.find("ble_store_util_delete_peer", pairing_pos)
+    require(pairing_pos >= 0 and enc_pos > pairing_pos and delete_pos > enc_pos,
+            "unauthorized bond deletion must occur after NimBLE persistence, not in pairing-complete callback")
+    require("ble_gap_terminate" in gap[enc_pos:],
+            "an unauthorized fresh bond must be disconnected after its persisted record is removed")
+    before(init, "ble_store_config_init()", "fido_ble_consume_pairing_window_grant()",
+           "persistent bonds must be restored before the one-time pairing grant is consumed")
+    before(init, "fido_ble_consume_pairing_window_grant()", "nimble_port_freertos_init",
+           "the one-time pairing grant must be consumed before BLE begins accepting connections")
+    require("nvs_set_u8" in schedule and "nvs_commit" in schedule,
+            "maintenance pairing grants must be durable before reboot")
+    require("WIFI_MANAGEMENT_ALLOW_BLE_PAIRING" in wifi_allow,
+            "the HTTP pairing action must enter the serialized core0 management queue")
+    before(wifi_task, "card_try_claim_maintenance()", "fido_ble_schedule_pairing_window()",
+           "pairing-grant persistence must execute under the global maintenance owner")
+
+
 def verify_otp_hid_adapter() -> None:
     source = text(OTP)
     set_report = function_body(source, "otp_hid_set_report_cb")
@@ -745,6 +791,7 @@ def main() -> None:
         ("CCID ownership", verify_ccid_adapter),
         ("APDU session storage", verify_apdu_sessions),
         ("BLE ownership", verify_ble_adapter),
+        ("BLE pairing security", verify_ble_pairing_security),
         ("OTP HID ownership", verify_otp_hid_adapter),
         ("PIV slot storage", verify_piv_slot_storage),
         ("Credential ownership", verify_credential_ownership),

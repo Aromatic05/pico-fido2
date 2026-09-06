@@ -10,10 +10,14 @@
 #include "pico_keys.h"
 #include "usb.h"
 #include "wifi_management.h"
+#if CONFIG_PICO_FIDO2_BLE
+#include "ble_fido.h"
+#endif
 
 typedef enum {
     WIFI_MANAGEMENT_READ,
     WIFI_MANAGEMENT_WRITE,
+    WIFI_MANAGEMENT_ALLOW_BLE_PAIRING,
 } wifi_management_operation_t;
 
 typedef struct {
@@ -137,6 +141,15 @@ esp_err_t fido_wifi_management_set_enabled(
     return err;
 }
 
+esp_err_t fido_wifi_management_allow_ble_pairing(void) {
+    wifi_management_request_t request = {
+        .id = __atomic_add_fetch(&request_id, 1, __ATOMIC_RELAXED),
+        .operation = WIFI_MANAGEMENT_ALLOW_BLE_PAIRING,
+    };
+    wifi_management_response_t response = {0};
+    return transact(&request, &response);
+}
+
 void fido_wifi_management_task(void) {
     if (request_queue == NULL || response_queue == NULL) {
         return;
@@ -167,6 +180,13 @@ void fido_wifi_management_task(void) {
                 response.result = ESP_FAIL;
             }
         }
+    }
+    else if (request.operation == WIFI_MANAGEMENT_ALLOW_BLE_PAIRING) {
+#if CONFIG_PICO_FIDO2_BLE
+        response.result = fido_ble_schedule_pairing_window();
+#else
+        response.result = ESP_ERR_NOT_SUPPORTED;
+#endif
     }
 
     if (response.result == ESP_OK && read_state(&response.state) != ESP_OK) {

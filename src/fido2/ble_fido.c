@@ -10,11 +10,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "nvs.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_att.h"
 #include "host/ble_hs.h"
 #include "host/ble_hs_mbuf.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -23,6 +25,7 @@
 #include "apdu.h"
 #include "ble_fido.h"
 #include "ble_fido_frame.h"
+#include "ble_pairing_policy.h"
 #include "fido/ctap2_cbor.h"
 #include "fido/fido.h"
 #include "fido/version.h"
@@ -33,6 +36,8 @@
 #define FIDO_BLE_CONTROL_POINT_LENGTH 512
 #define FIDO_BLE_REVISION_FIDO2       0x20
 #define FIDO_BLE_FRAGMENT_TIMEOUT_MS  1500
+#define FIDO_BLE_PAIRING_NVS_NAMESPACE "pico_ble"
+#define FIDO_BLE_PAIRING_NVS_KEY       "pair_grant"
 
 static const char *TAG = "fido_ble";
 
@@ -110,6 +115,8 @@ static QueueHandle_t event_queue;
 static bool event_overflow;
 static bool advertising_enabled = true;
 static bool ble_stack_running;
+static fido_ble_pairing_policy_t pairing_policy;
+static bool gatt_reject_after_pairing;
 
 extern const uint8_t fido_aid[];
 extern void *cbor_thread(void *);
@@ -119,6 +126,68 @@ void ble_store_config_init(void);
 static int fido_ble_gap_event(struct ble_gap_event *event, void *arg);
 static void fido_ble_advertise(void);
 static void fido_ble_release_request(void);
+
+static bool fido_ble_peer_is_bonded(const ble_addr_t *peer_id_addr) {
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int peer_count = 0;
+    if (ble_store_util_bonded_peers(peers, &peer_count,
+                                    CONFIG_BT_NIMBLE_MAX_BONDS) != 0) {
+        return false;
+    }
+    for (int i = 0; i < peer_count; ++i) {
+        if (peers[i].type == peer_id_addr->type &&
+            memcmp(peers[i].val, peer_id_addr->val, sizeof(peers[i].val)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool fido_ble_consume_pairing_window_grant(void) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FIDO_BLE_PAIRING_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pairing grant NVS open failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    uint8_t grant = 0;
+    err = nvs_get_u8(handle, FIDO_BLE_PAIRING_NVS_KEY, &grant);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(handle);
+        return false;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pairing grant NVS read failed: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+
+    err = nvs_erase_key(handle, FIDO_BLE_PAIRING_NVS_KEY);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pairing grant consume failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return grant == 1;
+}
+
+esp_err_t fido_ble_schedule_pairing_window(void) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FIDO_BLE_PAIRING_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(handle, FIDO_BLE_PAIRING_NVS_KEY, 1);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
 
 static void fido_ble_queue_event(fido_ble_event_t event) {
     if (event_queue == NULL || xQueueSend(event_queue, &event, 0) != pdPASS) {
@@ -329,9 +398,13 @@ static int fido_ble_control_point_write(struct os_mbuf *om) {
 
 static int fido_ble_access(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    (void)conn_handle;
     (void)attr_handle;
     enum fido_ble_attr attr = (enum fido_ble_attr)(uintptr_t)arg;
+
+    if (conn_handle != gatt_connection_handle ||
+        !fido_ble_pairing_access_allowed(&pairing_policy)) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+    }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attr == FIDO_BLE_ATTR_CONTROL_POINT) {
         if (!gatt_revision_selected) {
@@ -503,6 +576,11 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
         gatt_connection_handle = event->connect.conn_handle;
         gatt_status_subscribed = false;
         gatt_revision_selected = false;
+        gatt_reject_after_pairing = false;
+        struct ble_gap_conn_desc connect_desc;
+        bool known_bond = ble_gap_conn_find(event->connect.conn_handle, &connect_desc) == 0 &&
+                          fido_ble_peer_is_bonded(&connect_desc.peer_id_addr);
+        fido_ble_pairing_on_connect(&pairing_policy, known_bond);
         if (!fido_ble_request_pending()) {
             xSemaphoreTake(rx_mutex, portMAX_DELAY);
             fido_ble_rx_reset(&rx);
@@ -522,6 +600,8 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
         gatt_connection_handle = BLE_HS_CONN_HANDLE_NONE;
         gatt_status_subscribed = false;
         gatt_revision_selected = false;
+        gatt_reject_after_pairing = false;
+        fido_ble_pairing_on_disconnect(&pairing_policy);
         if (!fido_ble_request_pending()) {
             xSemaphoreTake(rx_mutex, portMAX_DELAY);
             fido_ble_rx_reset(&rx);
@@ -553,12 +633,54 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        if (!fido_ble_pairing_repeat_allowed(&pairing_policy, board_millis())) {
+            ESP_LOGW(TAG, "repeat pairing rejected outside maintenance pairing window");
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        }
         struct ble_gap_conn_desc desc;
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
+            if (ble_store_util_delete_peer(&desc.peer_id_addr) == 0) {
+                return BLE_GAP_REPEAT_PAIRING_RETRY;
+            }
         }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
+        return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
+
+    case BLE_GAP_EVENT_PARING_COMPLETE:
+        if (event->pairing_complete.conn_handle != gatt_connection_handle) {
+            return 0;
+        }
+        gatt_reject_after_pairing =
+            fido_ble_pairing_complete(&pairing_policy,
+                                      event->pairing_complete.status == 0,
+                                      board_millis()) == FIDO_BLE_PAIRING_REJECTED;
+        if (gatt_reject_after_pairing) {
+            ESP_LOGW(TAG, "fresh pairing completed without maintenance grant; rejecting bond");
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        if (event->enc_change.status != 0 ||
+            event->enc_change.conn_handle != gatt_connection_handle) {
+            return 0;
+        }
+        if (gatt_reject_after_pairing) {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+            gatt_reject_after_pairing = false;
+            ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
+            return 0;
+        }
+        if (!fido_ble_pairing_access_allowed(&pairing_policy)) {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
+                fido_ble_peer_is_bonded(&desc.peer_id_addr)) {
+                fido_ble_pairing_on_connect(&pairing_policy, true);
+            }
+        }
+        return 0;
 
     default:
         return 0;
@@ -681,6 +803,7 @@ void fido_ble_init(void) {
     gatt_connection_handle = BLE_HS_CONN_HANDLE_NONE;
     gatt_status_subscribed = false;
     gatt_revision_selected = false;
+    gatt_reject_after_pairing = false;
     fido_ble_rx_reset(&rx);
 
     ESP_ERROR_CHECK(nimble_port_init());
@@ -711,6 +834,19 @@ void fido_ble_init(void) {
     assert(ble_gatts_count_cfg(fido_ble_services) == 0);
     assert(ble_gatts_add_svcs(fido_ble_services) == 0);
     ble_store_config_init();
+    bool pairing_grant = fido_ble_consume_pairing_window_grant();
+    fido_ble_pairing_policy_init(
+        &pairing_policy,
+        CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC * 1000U,
+        pairing_grant,
+        board_millis());
+    if (pairing_grant) {
+        ESP_LOGI(TAG, "fresh BLE pairing enabled for %d seconds",
+                 CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
+    }
+    else {
+        ESP_LOGI(TAG, "fresh BLE pairing disabled; existing bonds remain available");
+    }
     nimble_port_freertos_init(fido_ble_host_task);
     __atomic_store_n(&ble_stack_running, true, __ATOMIC_RELEASE);
 }

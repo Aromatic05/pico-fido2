@@ -16,6 +16,15 @@ config PICO_FIDO2_BLE
         Expose the standard FIDO GATT service over ESP-NimBLE and route BLE
         MSG requests through the same CTAP2 core used by USB HID.
 
+config PICO_FIDO2_BLE_PAIRING_WINDOW_SEC
+    int "Fresh BLE pairing window in seconds"
+    range 15 300
+    default 60
+    depends on PICO_FIDO2_BLE
+    help
+        A fresh BLE bond is accepted only during a one-time maintenance-granted
+        pairing window. Existing bonded peers remain usable outside the window.
+
 config PICO_FIDO2_WIFI_COMMISSIONING
     bool "Wi-Fi commissioning SoftAP"
     default n
