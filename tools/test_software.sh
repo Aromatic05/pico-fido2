@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 python tests/formal_state_model.py
+python tests/button_press_model.py
 python tests/sdkconfig_contracts.py
 git diff --check
 
@@ -47,6 +48,35 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o build-host-asan/ble_fido_frame_test
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
     build-host-asan/ble_fido_frame_test
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 tests/ble_pairing_policy_test.c src/fido2/ble_pairing_policy.c \
+    -o build-host-asan/ble_pairing_policy_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/ble_pairing_policy_test
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 tests/wifi_presence_policy_test.c src/fido2/wifi_presence_policy.c \
+    -o build-host-asan/wifi_presence_policy_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/wifi_presence_policy_test
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 -I pico-fido/src \
+    tests/wifi_management_wire_test.c src/fido2/wifi_management_wire.c \
+    -o build-host-asan/wifi_management_wire_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/wifi_management_wire_test
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 tests/wifi_captive_dns_test.c src/fido2/wifi_captive_dns.c \
+    -o build-host-asan/wifi_captive_dns_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/wifi_captive_dns_test
 
 cmake -S . -B build-host-tsan \
     -DENABLE_EMULATION=1 \
