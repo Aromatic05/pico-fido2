@@ -521,6 +521,101 @@ def validate_provisioned_device_state(
     validate_provisioned_key_layout(state, expected)
 
 
+def validate_flash_encryption_pre_secure_state(
+    state: ProvisioningDeviceState,
+    expected: dict[int, tuple[str, bool, bytes | None]],
+) -> None:
+    if state.secure_boot:
+        raise SystemExit("Secure Boot is already enabled before activation verification")
+    if state.flash_encryption_raw != 0x1:
+        raise SystemExit(
+            "Flash Encryption activation checkpoint requires SPI_BOOT_CRYPT_CNT=0b001, "
+            f"found 0x{state.flash_encryption_raw:x}"
+        )
+    if state.security_floor != 0:
+        raise SystemExit(
+            f"SECURE_VERSION must remain 0 in the current safe provisioning phase, found {state.security_floor}"
+        )
+    if not state.download_mode_enabled:
+        raise SystemExit("ROM download recovery is disabled")
+    if not state.usb_download_mode_enabled:
+        raise SystemExit("USB Serial/JTAG ROM download recovery is disabled")
+    validate_provisioned_key_layout(state, expected)
+
+
+def activate_secure_virtual_command(args: argparse.Namespace) -> None:
+    if not args.virt_file.is_file():
+        raise SystemExit("--virt-file must already exist and contain provisioned KEY0/1/3/4")
+    verify_manifest(args.manifest, quiet=True)
+    expected_mac = expected_mac_guard(args, args.manifest)
+    expected = expected_provisioning_material(args.manifest)
+    state = read_provisioning_state(virt_file=args.virt_file)
+    if expected_mac is not None and expected_mac != state.mac:
+        raise SystemExit(f"expected MAC {expected_mac}, device reports {state.mac}")
+
+    if state.secure_boot and state.flash_encryption_raw != 0x1:
+        raise SystemExit(
+            "unsafe activation order: Secure Boot is enabled but SPI_BOOT_CRYPT_CNT is not 0b001"
+        )
+    if state.secure_boot:
+        validate_secure_device_state(state, expected)
+        pending: list[str] = []
+    elif state.flash_encryption_raw == 0:
+        validate_provisioned_device_state(state, expected)
+        pending = ["Flash Encryption", "Secure Boot"]
+    elif state.flash_encryption_raw == 0x1:
+        validate_flash_encryption_pre_secure_state(state, expected)
+        pending = ["Secure Boot"]
+    else:
+        raise SystemExit(
+            "experimental activation accepts only SPI_BOOT_CRYPT_CNT=0b000 or 0b001, "
+            f"found 0b{state.flash_encryption_raw:03b}"
+        )
+
+    print("ESP32-S3 virtual security activation rehearsal")
+    print(f"source:              {args.virt_file}")
+    print(f"manifest:            {args.manifest}")
+    if args.target_manifest is not None:
+        print(f"target:              {args.target_manifest}")
+    print(f"device MAC:          {state.mac}")
+    print("SECURE_VERSION:      0")
+    print("ROM recovery:        enabled")
+    print("pending steps:       " + (" -> ".join(pending) if pending else "none"))
+
+    if not pending:
+        print("virtual write:       no (already secured)")
+        return
+    if not args.apply:
+        print("virtual write:       no (dry-run)")
+        return
+
+    if state.flash_encryption_raw == 0:
+        run(
+            espefuse_base(virt_file=args.virt_file)
+            + ["--do-not-confirm", "burn_efuse", "SPI_BOOT_CRYPT_CNT", "0x1"],
+            quiet=True,
+        )
+        flash_state = read_provisioning_state(virt_file=args.virt_file)
+        if flash_state.mac != state.mac:
+            raise SystemExit("device MAC changed during Flash Encryption activation")
+        validate_flash_encryption_pre_secure_state(flash_state, expected)
+        state = flash_state
+        print("Flash Encryption:    PASS (SPI_BOOT_CRYPT_CNT=0b001)")
+
+    run(
+        espefuse_base(virt_file=args.virt_file)
+        + ["--do-not-confirm", "burn_efuse", "SECURE_BOOT_EN", "1"],
+        quiet=True,
+    )
+    final = read_provisioning_state(virt_file=args.virt_file)
+    if final.mac != state.mac:
+        raise SystemExit("device MAC changed during Secure Boot activation")
+    validate_secure_device_state(final, expected)
+    print("Secure Boot:         PASS")
+    print("SECURE_VERSION:      PASS (still 0)")
+    print("virtual write:       applied")
+
+
 def validate_provisioned_key_layout(
     state: ProvisioningDeviceState,
     expected: dict[int, tuple[str, bool, bytes | None]],
@@ -823,6 +918,8 @@ def print_plan() -> None:
     print()
     print("KEY0/1/3/4 writes are available only against an espefuse --virt backing file.")
     print("There is no physical-device KEY0/KEY1/KEY3/KEY4 burn command.")
+    print("Flash Encryption/Secure Boot enable-bit writes can likewise be rehearsed only with activate-secure-virtual.")
+    print("There is no physical-device security activation command in this tool.")
     print("Only 'security-version --apply' can burn SECURE_VERSION; real hardware also requires current-floor and MAC guards.")
 
 
@@ -886,6 +983,14 @@ def main() -> None:
     provision_virtual.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
     provision_virtual.add_argument("--target-manifest", type=Path, help="device binding checked before any virtual burn")
     provision_virtual.add_argument("--apply", action="store_true", help="write the virtual eFuse backing file")
+    activate_virtual = sub.add_parser(
+        "activate-secure-virtual",
+        help="rehearse Flash Encryption then Secure Boot activation on a virtual eFuse only",
+    )
+    activate_virtual.add_argument("--virt-file", type=Path, required=True)
+    activate_virtual.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    activate_virtual.add_argument("--target-manifest", type=Path, help="device binding checked before any virtual eFuse activation")
+    activate_virtual.add_argument("--apply", action="store_true", help="write only the virtual eFuse backing file")
     secver = sub.add_parser("security-version", help="plan or apply the anti-rollback SECURE_VERSION floor")
     source = secver.add_mutually_exclusive_group(required=True)
     source.add_argument("--current", type=int, help="offline current floor (0..16)")
@@ -923,6 +1028,8 @@ def main() -> None:
         secure_state_command(args)
     elif args.command == "provision-virtual":
         virtual_provision_command(args)
+    elif args.command == "activate-secure-virtual":
+        activate_secure_virtual_command(args)
     else:
         security_version_command(args)
 

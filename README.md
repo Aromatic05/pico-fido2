@@ -321,11 +321,32 @@ The exact KEY0/KEY1/KEY3/KEY4 burn sequence can be rehearsed against an `espefus
 
 `provision-virtual` has no `--port` argument. It is dry-run by default, is idempotent once all four blocks match, and can resume only while every previously written block is still independently verifiable. In particular, if KEY1 has already become read-protected while any other required block is incomplete, the tool refuses to continue because the Flash Encryption key can no longer be compared with the manifest. Initial provisioning also refuses any nonzero `SECURE_VERSION`.
 
+The final enable-bit ordering has a separate **virtual-only** transaction rehearsal. It first verifies the provisioned key layout and target binding, burns `SPI_BOOT_CRYPT_CNT=0b001`, reads the entire provisioning state back, and only after that checkpoint succeeds burns `SECURE_BOOT_EN=1` and runs the final secured-state verification:
+
+```bash
+./tools/esp32s3_provision.py activate-secure-virtual \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json
+./tools/esp32s3_provision.py activate-secure-virtual \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json \
+    --apply
+./tools/esp32s3_provision.py verify-secure \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-virtual.json
+```
+
+`activate-secure-virtual` deliberately has no `--port`. It accepts only the reversible experiment policy (`SECURE_VERSION=0`, recovery paths enabled, exact KEY0/1/3/4 layout), supports resuming the safe intermediate state `SPI_BOOT_CRYPT_CNT=0b001 + Secure Boot off`, and is idempotent once both features are enabled. It refuses an inverted state where Secure Boot is already enabled but Flash Encryption is not at `0b001`. It never writes `SECURE_VERSION`.
+
 The virtual failure-state gate covers full provisioning, idempotency, safe readable-key partial recovery, unreadable KEY1 partial refusal, wrong readable key material, nonzero `SECURE_VERSION`, and the absence of any hardware port option:
 
 ```bash
 . "$IDF_PATH/export.sh"
 ./tools/test_esp32s3_virtual_provisioning.sh
+./tools/test_esp32s3_virtual_security_activation.sh
 ```
 
 Before any hardware key provisioning, create the target manifest from the factory MAC, then run the read-only blank-device preflight against that binding. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
