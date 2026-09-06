@@ -40,6 +40,7 @@ reject_config() {
 require_config 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' 'development root keys'
 require_config 'CONFIG_PICO_FIDO2_BLE=y' 'FIDO BLE transport'
 require_config 'CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y' 'Wi-Fi commissioning'
+require_config 'CONFIG_BT_NIMBLE_NVS_PERSIST=y' 'persistent BLE bonds'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
 reject_config 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' 'Flash Encryption'
 
