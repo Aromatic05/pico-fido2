@@ -25,6 +25,16 @@ config PICO_FIDO2_BLE_PAIRING_WINDOW_SEC
         A fresh BLE bond is accepted only during a one-time maintenance-granted
         pairing window. Existing bonded peers remain usable outside the window.
 
+config PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC
+    int "BOOT user-presence timeout in seconds"
+    range 5 60
+    default 15
+    depends on IDF_TARGET_ESP32S3
+    help
+        Require a physical BOOT press for FIDO/U2F and other operations that
+        request user presence. This is a runtime product policy and is not
+        persisted into the user's PicoKeys PHY configuration.
+
 config PICO_FIDO2_WIFI_COMMISSIONING
     bool "Wi-Fi commissioning SoftAP"
     default n
@@ -74,11 +84,42 @@ config PICO_FIDO2_WIFI_COMMISSION_PRESSES
 config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
     int "Commissioning idle timeout in seconds"
     range 30 3600
-    default 300
+    default 600
     depends on PICO_FIDO2_WIFI_COMMISSIONING
     help
         Reboot after this much commissioning inactivity. Reboot exits Wi-Fi
         maintenance mode and restores the normal BLE FIDO transport.
 
+
+config PICO_FIDO2_AB_OTA
+    bool "Signed A/B firmware update"
+    default n
+    help
+        Enable the transport-independent A/B update and boot-confirmation
+        lifecycle. When Wi-Fi maintenance is also enabled it exposes the
+        signed plaintext upload endpoint there. Secure Boot verifies the image
+        and Flash Encryption encrypts writes with the device-local key. This
+        feature uses ESP-IDF software rollback and does not advance the
+        irreversible SECURE_VERSION eFuse.
+
+config PICO_FIDO2_DEVELOPMENT_INSECURE_OTA
+    bool "Development OTA before Secure Boot / Flash Encryption"
+    default n
+    depends on PICO_FIDO2_AB_OTA && PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    help
+        Development-only bring-up switch. Permit A/B OTA while Secure Boot and
+        Flash Encryption are still disabled so the update/rollback path can be
+        proven on hardware before any irreversible eFuse provisioning. Do not
+        enable this in a secured or production profile.
+
+config PICO_FIDO2_OTA_CONFIRM_DELAY_SEC
+    int "A/B OTA boot confirmation delay in seconds"
+    range 1 300
+    default 5
+    depends on PICO_FIDO2_AB_OTA
+    help
+        Keep a newly selected OTA image in PENDING_VERIFY until the normal
+        core0 service loop has remained alive for this long. A crash, watchdog
+        reset, or power loss before confirmation causes ESP-IDF to roll back.
 
 endmenu
