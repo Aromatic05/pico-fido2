@@ -16,6 +16,7 @@ command -v "$runtime" >/dev/null || fail "$runtime not found"
 # Product correctness gates must run with every normal host FIDO test.  The
 # heavier sanitizer/durability/ESP32 build remains in test_transport_ownership_gate.sh.
 python3 tests/formal_state_model.py
+python3 tests/button_press_model.py
 python3 tests/source_ownership_contracts.py
 python3 tests/yubikey_profile_contracts.py
 python3 tests/sdkconfig_contracts.py

@@ -144,7 +144,7 @@ static void fido_wifi_start(void) {
 }
 
 static int fido_wifi_button_pressed(uint8_t presses) {
-    if (presses == CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES) {
+    if (presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES) {
         fido_wifi_start();
         return 0;
     }

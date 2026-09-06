@@ -18,6 +18,7 @@ HWRNG = SDK / "rng" / "hwrng.c"
 EMULATION = SDK / "usb" / "emulation" / "emulation.c"
 LED = SDK / "led" / "led.c"
 BLE = ROOT / "src" / "fido2" / "ble_fido.c"
+WIFI_COMMISSION = ROOT / "src" / "fido2" / "wifi_commission.c"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
 CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
@@ -127,11 +128,32 @@ def verify_arbiter() -> None:
 def verify_button_signals() -> None:
     source = text(MAIN)
     wait = function_body(source, "wait_button")
+    core0 = function_body(source, "core0_loop")
+    wifi = function_body(text(WIFI_COMMISSION), "fido_wifi_button_pressed")
+    otp = function_body(text(OTP), "otp_button_pressed")
     require("__atomic_store_n(&cancel_button" in source, "cancel request must use atomic stores")
     require("__atomic_load_n(&cancel_button" in source, "cancel request must use atomic loads")
     require("__atomic_store_n(&req_button_pending" in source, "button-pending state must use atomic stores")
     require("__atomic_load_n(&req_button_pending" in source, "button-pending state must use atomic loads")
     require("execute_tasks()" not in wait, "worker-side button wait must not recursively run transport tasks")
+    require("#define BUTTON_DEBOUNCE_MS 40U" in source,
+            "BOOT multi-press must retain an explicit stable-state debounce interval")
+    require("raw_button_state != button_raw_state" in core0 and
+            "now - button_raw_changed_time >= BUTTON_DEBOUNCE_MS" in core0,
+            "BOOT multi-press must accept GPIO transitions only after stable debounce")
+    require("now - button_pressed_time >= BUTTON_MULTI_PRESS_WINDOW_MS" in core0,
+            "BOOT multi-press completion must use wrap-safe elapsed-time arithmetic")
+    require("button_press = 1" in core0,
+            "a release after the sequence window must start a new sequence")
+    require("button_press < UINT8_MAX" in core0,
+            "BOOT multi-press count must saturate instead of wrapping")
+    require("presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES" in wifi,
+            "commissioning must accept threshold-or-more presses so bounce cannot bypass it")
+    require("previous_button_pressed_cb(presses)" in wifi,
+            "sub-threshold BOOT sequences must remain routable to OTP")
+    before(otp, "slot == 0 || slot > (EF_OTP_SLOT4 - EF_OTP_SLOT1 + 1)",
+           "uint16_t slot_ef = EF_OTP_SLOT1 + slot - 1",
+           "OTP button callback must reject out-of-range slots before deriving a file id")
 
 
 def verify_hwrng_state() -> None:
