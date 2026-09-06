@@ -616,6 +616,7 @@ static void fido_ble_process_events(void) {
 
 void fido_ble_init(void) {
     ble_itf = card_register_interface(500);
+    assert(ble_itf != ITF_INVALID);
     core_state = FIDO_BLE_CORE_IDLE;
     rx_mutex = xSemaphoreCreateMutex();
     request_queue = xQueueCreate(1, sizeof(fido_ble_request_t));

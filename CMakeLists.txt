@@ -22,7 +22,6 @@ set(USB_PID 0x0407)
 add_compile_definitions(PICO_FIDO_DEVICE_VERSION=0x0507)
 
 if(ESP_PLATFORM)
-    set(DEBUG_APDU 1)
     set(EXTRA_COMPONENT_DIRS
         src/fido2
         pico-keys-sdk/src
