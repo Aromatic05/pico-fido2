@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate and describe deterministic ESP32-S3 Pico FIDO2 provisioning material.
+"""Generate and validate ESP32-S3 Pico FIDO2 provisioning material.
 
-Key provisioning stays host-only. The only device-write path is the explicit
-``security-version --apply`` command, which advances the ESP32-S3 anti-rollback
-SECURE_VERSION floor after checking the current canonical unary value.
+KEY0/KEY1/KEY3/KEY4 provisioning has a virtual-eFuse rehearsal path only. It
+cannot address a serial port or write physical hardware. The separate explicit
+``security-version --apply`` command is the only real-device write path in this
+tool and is intentionally independent from initial key provisioning.
 """
 
 from __future__ import annotations
@@ -76,6 +77,13 @@ FILES = {
     "flash_encryption_key": "flash_encryption_key.bin",
     "mkek": "mkek.bin",
     "device_key": "device_key_secp256k1.bin",
+}
+
+PROVISION_BURN = {
+    0: (FILES["secure_boot_digest"], "SECURE_BOOT_DIGEST0"),
+    1: (FILES["flash_encryption_key"], "XTS_AES_128_KEY"),
+    3: (FILES["mkek"], "USER"),
+    4: (FILES["device_key"], "USER"),
 }
 
 
@@ -334,9 +342,15 @@ def expected_provisioning_material(manifest_path: Path) -> dict[int, tuple[str, 
     if manifest.get("chip") != "esp32s3" or manifest.get("layout") != LAYOUT:
         raise SystemExit("manifest chip/layout mismatch")
     digest = (root / FILES["secure_boot_digest"]).read_bytes()
+    flash_key = (root / FILES["flash_encryption_key"]).read_bytes()
     mkek = (root / FILES["mkek"]).read_bytes()
     device_key = (root / FILES["device_key"]).read_bytes()
-    if len(digest) != 32 or len(mkek) != 32 or len(device_key) != 32:
+    if (
+        len(digest) != 32
+        or len(flash_key) != 32
+        or len(mkek) != 32
+        or len(device_key) != 32
+    ):
         raise SystemExit("unexpected provisioning key length")
     return {
         0: ("SECURE_BOOT_DIGEST0", True, digest),
@@ -344,6 +358,101 @@ def expected_provisioning_material(manifest_path: Path) -> dict[int, tuple[str, 
         3: ("USER", True, mkek),
         4: ("USER", True, device_key),
     }
+
+
+def key_block_is_blank(key: KeyBlockState) -> bool:
+    return (
+        key.purpose == "USER"
+        and key.purpose_writeable
+        and key.readable
+        and key.writeable
+        and key.raw_value == 0
+        and key.value == bytes(32)
+    )
+
+
+def key_block_matches_expected(
+    key: KeyBlockState,
+    expected: tuple[str, bool, bytes | None],
+) -> bool:
+    purpose, readable, value = expected
+    return (
+        key.purpose == purpose
+        and not key.purpose_writeable
+        and not key.writeable
+        and key.readable == readable
+        and (not readable or key.value == value)
+    )
+
+
+def virtual_provisioning_pending_blocks(
+    state: ProvisioningDeviceState,
+    expected: dict[int, tuple[str, bool, bytes | None]],
+) -> list[int]:
+    validate_pre_enable_state(state)
+    pending: list[int] = []
+    provisioned: set[int] = set()
+    for index in PROVISION_KEY_BLOCKS:
+        key = state.keys[index]
+        if key_block_matches_expected(key, expected[index]):
+            provisioned.add(index)
+        elif key_block_is_blank(key):
+            pending.append(index)
+        else:
+            raise SystemExit(
+                f"KEY{index} is neither blank nor an exact protected match for the provisioning manifest"
+            )
+
+    if 1 in provisioned and pending:
+        raise SystemExit(
+            "partial provisioning cannot be resumed after KEY1 became unreadable; "
+            "refusing to assume Flash Encryption key material"
+        )
+    return pending
+
+
+def virtual_provision_command(args: argparse.Namespace) -> None:
+    if not args.virt_file.is_file():
+        raise SystemExit(
+            "--virt-file must already exist; initialize/inspect a blank virtual eFuse with preflight first"
+        )
+    verify_manifest(args.manifest, quiet=True)
+    expected = expected_provisioning_material(args.manifest)
+    state = read_provisioning_state(virt_file=args.virt_file)
+    pending = virtual_provisioning_pending_blocks(state, expected)
+
+    print("ESP32-S3 virtual key provisioning rehearsal")
+    print(f"source:              {args.virt_file}")
+    print(f"manifest:            {args.manifest}")
+    print(f"device MAC:          {state.mac}")
+    print("SECURE_VERSION:      0")
+    print("Secure Boot:         disabled")
+    print("Flash Encryption:    disabled")
+    print(
+        "pending blocks:      "
+        + (", ".join(f"KEY{index}" for index in pending) if pending else "none")
+    )
+
+    if not pending:
+        validate_provisioned_device_state(state, expected)
+        print("virtual write:       no (already provisioned)")
+        return
+    if not args.apply:
+        print("virtual write:       no (dry-run)")
+        return
+
+    root = args.manifest.parent
+    command = espefuse_base(virt_file=args.virt_file) + ["--do-not-confirm", "burn_key"]
+    for index in pending:
+        filename, purpose = PROVISION_BURN[index]
+        command.extend([f"BLOCK_KEY{index}", str(root / filename), purpose])
+    run(command, quiet=True)
+
+    after = read_provisioning_state(virt_file=args.virt_file)
+    validate_provisioned_device_state(after, expected)
+    print("KEY0/1/3/4 layout:   PASS")
+    print("KEY1 read protect:   PASS")
+    print("virtual write:       applied")
 
 
 def validate_provisioned_device_state(
@@ -652,7 +761,8 @@ def print_plan() -> None:
     print("7. Enable SECURE_BOOT_EN last, after image/key verification.")
     print("8. Production hardening, if wanted later, is a separate irreversible policy step.")
     print()
-    print("Key provisioning commands never write a device.")
+    print("KEY0/1/3/4 writes are available only against an espefuse --virt backing file.")
+    print("There is no physical-device KEY0/KEY1/KEY3/KEY4 burn command.")
     print("Only 'security-version --apply' can burn SECURE_VERSION; real hardware also requires current-floor and MAC guards.")
 
 
@@ -700,6 +810,13 @@ def main() -> None:
     verify_secure_source.add_argument("--virt-file", type=Path, help="espefuse virtual backing file for host tests")
     verify_secure.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
     verify_secure.add_argument("--expect-mac", type=mac_argument, help="required factory MAC guard for real-device inspection")
+    provision_virtual = sub.add_parser(
+        "provision-virtual",
+        help="rehearse KEY0/1/3/4 provisioning against an espefuse virtual backing file only",
+    )
+    provision_virtual.add_argument("--virt-file", type=Path, required=True)
+    provision_virtual.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
+    provision_virtual.add_argument("--apply", action="store_true", help="write the virtual eFuse backing file")
     secver = sub.add_parser("security-version", help="plan or apply the anti-rollback SECURE_VERSION floor")
     source = secver.add_mutually_exclusive_group(required=True)
     source.add_argument("--current", type=int, help="offline current floor (0..16)")
@@ -730,6 +847,8 @@ def main() -> None:
         provisioning_state_command(args, provisioned=True)
     elif args.command == "verify-secure":
         secure_state_command(args)
+    elif args.command == "provision-virtual":
+        virtual_provision_command(args)
     else:
         security_version_command(args)
 

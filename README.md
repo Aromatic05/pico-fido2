@@ -288,6 +288,31 @@ KEY5 = FREE
 ./tools/esp32s3_provision.py verify build-provisioning/manifest.json
 ```
 
+The exact KEY0/KEY1/KEY3/KEY4 burn sequence can be rehearsed against an `espefuse --virt` backing file without exposing any physical-device key-write path. Initialize the virtual file with the existing read-only preflight, inspect the pending plan, then explicitly apply it:
+
+```bash
+./tools/esp32s3_provision.py preflight --virt-file build-provisioning/efuse-virtual.bin
+./tools/esp32s3_provision.py provision-virtual \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json
+./tools/esp32s3_provision.py provision-virtual \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json \
+    --apply
+./tools/esp32s3_provision.py verify-device \
+    --virt-file build-provisioning/efuse-virtual.bin \
+    --manifest build-provisioning/manifest.json
+```
+
+`provision-virtual` has no `--port` argument. It is dry-run by default, is idempotent once all four blocks match, and can resume only while every previously written block is still independently verifiable. In particular, if KEY1 has already become read-protected while any other required block is incomplete, the tool refuses to continue because the Flash Encryption key can no longer be compared with the manifest. Initial provisioning also refuses any nonzero `SECURE_VERSION`.
+
+The virtual failure-state gate covers full provisioning, idempotency, safe readable-key partial recovery, unreadable KEY1 partial refusal, wrong readable key material, nonzero `SECURE_VERSION`, and the absence of any hardware port option:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_virtual_provisioning.sh
+```
+
 Before any hardware key provisioning, run the read-only blank-device preflight and bind the inspection to the exact factory MAC. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
 
 ```bash
@@ -305,7 +330,7 @@ After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabl
     --manifest build-provisioning/manifest.json
 ```
 
-`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. The current tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning also requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. `provision-virtual --apply` writes only the specified virtual backing file; the tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
 
 After the encrypted image has been programmed and the development Flash Encryption state plus Secure Boot have both been enabled, use the final read-only verifier before treating the device as a secured candidate:
 
