@@ -40,6 +40,10 @@ reject_config() {
 require_config 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' 'development root keys'
 require_config 'CONFIG_PICO_FIDO2_BLE=y' 'FIDO BLE transport'
 require_config 'CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y' 'Wi-Fi commissioning'
+require_config 'CONFIG_APP_REPRODUCIBLE_BUILD=y' 'reproducible application build'
+require_config 'CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6' 'bounded Wi-Fi static RX buffers'
+require_config 'CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic RX buffers'
+require_config 'CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic TX buffers'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
 reject_config 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' 'Flash Encryption'
 

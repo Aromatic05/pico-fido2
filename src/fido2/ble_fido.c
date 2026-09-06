@@ -107,6 +107,7 @@ typedef struct {
 static QueueHandle_t request_queue;
 static QueueHandle_t event_queue;
 static bool event_overflow;
+static bool advertising_enabled = true;
 
 extern const uint8_t fido_aid[];
 extern void *cbor_thread(void *);
@@ -403,6 +404,9 @@ static const struct ble_gatt_svc_def fido_ble_services[] = {
 };
 
 static void fido_ble_advertise(void) {
+    if (!__atomic_load_n(&advertising_enabled, __ATOMIC_ACQUIRE)) {
+        return;
+    }
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (uint8_t *)ble_svc_gap_device_name();
@@ -434,6 +438,20 @@ static void fido_ble_advertise(void) {
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &params, fido_ble_gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "advertisement start: %d", rc);
+    }
+}
+
+void fido_ble_set_advertising_enabled(bool enabled) {
+    __atomic_store_n(&advertising_enabled, enabled, __ATOMIC_RELEASE);
+    if (!enabled) {
+        int rc = ble_gap_adv_stop();
+        if (rc != 0 && rc != BLE_HS_EALREADY) {
+            ESP_LOGW(TAG, "advertisement stop: %d", rc);
+        }
+        return;
+    }
+    if (gatt_connection_handle == BLE_HS_CONN_HANDLE_NONE) {
+        fido_ble_advertise();
     }
 }
 
