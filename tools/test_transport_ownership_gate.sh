@@ -112,8 +112,10 @@ else
     source "$IDF_PATH/export.sh" >/dev/null 2>&1
 fi
 
-idf.py -B build-bringup-wireless reconfigure
-idf.py -B build-bringup-wireless build
-sha256sum build-bringup-wireless/pico_fido2.bin
+# The authoritative bring-up entrypoint regenerates sdkconfig from the profile
+# defaults before building, then rejects unsafe/high-power drift such as PM
+# being disabled, BLE modem sleep being disabled, or TX power returning to
+# +9 dBm. A plain idf.py reconfigure preserves stale sdkconfig choices.
+./tools/esp32s3_bringup.sh build
 
 echo "transport ownership software gate: PASS"
