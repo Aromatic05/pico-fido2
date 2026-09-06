@@ -32,6 +32,7 @@
 #include "fido/version.h"
 #include "pico_keys.h"
 #include "usb.h"
+#include "wifi_captive_dns.h"
 #include "wifi_management.h"
 #include "wifi_presence_policy.h"
 #if CONFIG_PICO_FIDO2_BLE
@@ -40,6 +41,7 @@
 
 static const char *TAG = "fido_wifi";
 static httpd_handle_t http_server;
+static esp_netif_t *softap_netif;
 static char softap_ssid[33];
 static char csrf_token[33];
 static bool commissioning_started;
@@ -491,8 +493,9 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 9;
     config.backlog_conn = 1;
+    config.uri_match_fn = httpd_uri_match_wildcard;
     esp_err_t err = httpd_start(&http_server, &config);
     if (err != ESP_OK) {
         return err;
@@ -507,6 +510,7 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
         {.uri = "/api/ble/bonds/reset", .method = HTTP_POST, .handler = ble_bond_reset_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
+        {.uri = "/*", .method = HTTP_GET, .handler = index_get},
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
         err = httpd_register_uri_handler(http_server, &handlers[i]);
@@ -527,6 +531,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "commissioning AP started: %s", softap_ssid);
     }
     else if (event_id == WIFI_EVENT_AP_STOP) {
+        fido_wifi_captive_dns_close();
         ESP_LOGE(TAG, "commissioning AP stopped unexpectedly");
     }
     else if (event_id == WIFI_EVENT_AP_STACONNECTED) {
@@ -569,7 +574,8 @@ static void fido_wifi_start(void) {
         commissioning_start_failed("network stack init", err);
         return;
     }
-    if (esp_netif_create_default_wifi_ap() == NULL) {
+    softap_netif = esp_netif_create_default_wifi_ap();
+    if (softap_netif == NULL) {
         commissioning_start_failed("SoftAP netif create", ESP_ERR_NO_MEM);
         return;
     }
@@ -621,6 +627,24 @@ static void fido_wifi_start(void) {
         commissioning_start_failed("SoftAP start", err);
         return;
     }
+
+    esp_netif_ip_info_t ip_info;
+    err = esp_netif_get_ip_info(softap_netif, &ip_info);
+    if (err == ESP_OK) {
+        const uint8_t captive_ip[4] = {
+            esp_ip4_addr1(&ip_info.ip),
+            esp_ip4_addr2(&ip_info.ip),
+            esp_ip4_addr3(&ip_info.ip),
+            esp_ip4_addr4(&ip_info.ip),
+        };
+        esp_err_t dns_err = fido_wifi_captive_dns_open(captive_ip);
+        if (dns_err != ESP_OK) {
+            ESP_LOGW(TAG, "captive DNS unavailable: %s", esp_err_to_name(dns_err));
+        }
+    }
+    else {
+        ESP_LOGW(TAG, "SoftAP IP readback failed: %s", esp_err_to_name(err));
+    }
     commissioning_started = true;
     touch_activity();
 
@@ -668,6 +692,8 @@ void fido_wifi_task(void) {
         return;
     }
 
+    fido_wifi_captive_dns_poll();
+
     TickType_t now = xTaskGetTickCount();
     TickType_t last = __atomic_load_n(&last_activity_tick, __ATOMIC_ACQUIRE);
     bool idle_expired = now - last >= pdMS_TO_TICKS(CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC * 1000U);
@@ -689,6 +715,7 @@ void fido_wifi_task(void) {
 
     ESP_LOGI(TAG, "%s; rebooting to normal USB/BLE mode",
              restart ? "maintenance restart requested" : "maintenance idle timeout");
+    fido_wifi_captive_dns_close();
     esp_restart();
 }
 

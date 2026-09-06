@@ -73,6 +73,13 @@ cc -std=c11 -Wall -Wextra -Werror \
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
     build-host-asan/wifi_management_wire_test
 
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 tests/wifi_captive_dns_test.c src/fido2/wifi_captive_dns.c \
+    -o build-host-asan/wifi_captive_dns_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/wifi_captive_dns_test
+
 cmake -S . -B build-host-tsan \
     -DENABLE_EMULATION=1 \
     -DCMAKE_BUILD_TYPE=Debug \

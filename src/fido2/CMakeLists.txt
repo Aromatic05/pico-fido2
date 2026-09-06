@@ -14,6 +14,7 @@ endif()
 if(CONFIG_PICO_FIDO2_WIFI_COMMISSIONING)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/wifi_commission.c
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_captive_dns.c
         ${CMAKE_CURRENT_LIST_DIR}/wifi_management.c
         ${CMAKE_CURRENT_LIST_DIR}/wifi_management_wire.c
         ${CMAKE_CURRENT_LIST_DIR}/wifi_presence_policy.c
