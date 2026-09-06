@@ -9,6 +9,7 @@ python tests/button_press_model.py
 python tests/source_ownership_contracts.py
 python tests/yubikey_profile_contracts.py
 python tests/sdkconfig_contracts.py
+python tests/dev_ota_client_test.py
 git diff --check
 
 cmake -S . -B build-host -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Debug

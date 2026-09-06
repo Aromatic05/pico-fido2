@@ -197,6 +197,12 @@ The portal reports runtime device state, reads the existing YubiKey management c
 
 The normal/production maintenance profile is deliberately short-lived and physically gated at entry: five BOOT presses open it, only one Wi-Fi station is accepted, the session reboots after five minutes of inactivity, and each session has a new 128-bit CSRF token. Once the physical entry gesture has opened maintenance there is no second BOOT confirmation for portal mutations. The explicit development-maintenance profile replaces that entry gesture with the unauthenticated USB development command and removes portal authorization checks, so development can switch USB/BLE → Wi-Fi maintenance → OTA → reboot without repeated button presses or ROM flashing.
 
+For development OTA, `tools/dev_ota.py` sends that USB command, waits for the maintenance portal, and streams a signed A/B application to `/api/update`. It deliberately does not alter host Wi-Fi state; connect the host to the `PicoFIDO2-*` development SoftAP through the normal network stack, then let the client continue. Use `--serial` when more than one `1050:0407` device is attached:
+
+```bash
+./tools/dev_ota.py build-ab-ota-update/pico_fido2-ota-signed.bin --serial <device-serial>
+```
+
 Wi-Fi only:
 
 ```bash
