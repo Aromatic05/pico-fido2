@@ -21,6 +21,13 @@ if(CONFIG_PICO_FIDO2_WIFI_COMMISSIONING)
     )
 endif()
 
+if(CONFIG_PICO_FIDO2_AB_OTA)
+    list(APPEND SOURCES
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_ota.c
+        ${CMAKE_CURRENT_LIST_DIR}/wifi_ota_policy.c
+    )
+endif()
+
 if(CONFIG_PICO_FIDO2_BLE OR CONFIG_PICO_FIDO2_WIFI_COMMISSIONING)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/esp32_transports.c)
 endif()

@@ -20,8 +20,12 @@ LED = SDK / "led" / "led.c"
 BLE = ROOT / "src" / "fido2" / "ble_fido.c"
 WIFI_COMMISSION = ROOT / "src" / "fido2" / "wifi_commission.c"
 WIFI_MANAGEMENT = ROOT / "src" / "fido2" / "wifi_management.c"
+WIFI_OTA = ROOT / "src" / "fido2" / "wifi_ota.c"
+WIFI_OTA_POLICY = ROOT / "src" / "fido2" / "wifi_ota_policy.c"
 WIFI_DEFAULTS = ROOT / "sdkconfig.wifi.defaults"
 WIRELESS_LAYOUT_DEFAULTS = ROOT / "sdkconfig.wireless-layout.defaults"
+SECURE_OTA_DEFAULTS = ROOT / "sdkconfig.secure-ota.defaults"
+SECURE_OTA_PARTITIONS = ROOT / "pico-keys-sdk" / "config" / "esp32" / "partitions-secure-ota.csv"
 BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
 SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
 UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_update_bundle.sh"
@@ -312,6 +316,57 @@ def verify_wifi_commissioning() -> None:
                 f"{label} build must preserve BLE and Wi-Fi feature profiles")
         require("sdkconfig.security-preprovisioned.defaults" in builder,
                 f"{label} build must retain the secure hardware profile")
+
+
+def verify_ab_ota() -> None:
+    portal = text(WIFI_COMMISSION)
+    ota = text(WIFI_OTA)
+    policy = text(WIFI_OTA_POLICY)
+    defaults = text(SECURE_OTA_DEFAULTS)
+    partitions = text(SECURE_OTA_PARTITIONS)
+    update_post = function_body(portal, "update_post")
+    begin = function_body(ota, "fido_ota_begin")
+    finish = function_body(ota, "fido_ota_finish")
+    confirm = function_body(ota, "fido_ota_boot_confirm_task")
+
+    for line in (
+        "otadata,  data, ota,     0x18000,  0x2000,    encrypted",
+        "ota_0,    app,  ota_0,   0x20000,  0x170000",
+        "ota_1,    app,  ota_1,   0x190000, 0x170000",
+        "part0,    0x40, 0x1,     0x300000, 1M,        encrypted",
+    ):
+        require(line in partitions, f"secure A/B layout must retain exact partition contract: {line}")
+    require("factory," not in partitions,
+            "secure A/B layout must not contain a factory app partition")
+    require("CONFIG_PICO_FIDO2_AB_OTA=y" in defaults and
+            "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in defaults,
+            "secure A/B profile must enable product OTA and ESP-IDF software rollback")
+    require("# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set" in defaults,
+            "secure A/B profile must not enable irreversible eFuse anti-rollback")
+
+    require("csrf_valid(req)" in update_post and "consume_physical_presence()" in update_post,
+            "firmware upload must require both session CSRF and one fresh BOOT confirmation")
+    before(update_post, "consume_physical_presence()", "fido_ota_begin(&session",
+           "physical confirmation must be consumed before opening the OTA write session")
+    require("httpd_req_recv" in update_post and "fido_ota_write(&session" in update_post,
+            "firmware upload must stream into the bounded OTA writer instead of buffering the image")
+
+    require("esp_secure_boot_enabled()" in function_body(ota, "fido_ota_get_status") and
+            "esp_flash_encryption_enabled()" in function_body(ota, "fido_ota_get_status"),
+            "A/B updates must fail closed unless Secure Boot and Flash Encryption are active")
+    before(begin, "card_try_claim_maintenance()", "esp_ota_begin(session->partition",
+           "OTA writes must own the global card maintenance lease before erasing an inactive slot")
+    require("esp_ota_abort(session->handle)" in function_body(ota, "fido_ota_abort"),
+            "interrupted OTA sessions must explicitly abort the IDF update handle")
+    before(finish, "esp_ota_end(session->handle)", "fido_ota_policy_check(",
+           "Secure Boot image verification must complete before product downgrade policy")
+    before(finish, "fido_ota_policy_check(", "esp_ota_set_boot_partition(session->partition)",
+           "wrong-project or older signed images must be rejected before changing the boot slot")
+    require("candidate_epoch < current_epoch" in policy,
+            "software downgrade policy must reject a candidate signed epoch older than the running image")
+    require("esp_ota_mark_app_valid_cancel_rollback()" in confirm and
+            "CONFIG_PICO_FIDO2_OTA_CONFIRM_DELAY_SEC" in confirm,
+            "a new OTA image must remain rollback-eligible until the service-loop stability delay expires")
 
 
 def verify_emulator_arbiter() -> None:
@@ -906,6 +961,7 @@ def main() -> None:
         ("button signals", verify_button_signals),
         ("HWRNG state", verify_hwrng_state),
         ("Wi-Fi commissioning", verify_wifi_commissioning),
+        ("A/B OTA", verify_ab_ota),
         ("emulator arbiter", verify_emulator_arbiter),
         ("runtime UI state", verify_runtime_ui_state),
         ("HID ownership", verify_hid_adapter),

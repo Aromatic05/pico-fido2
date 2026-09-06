@@ -9,6 +9,9 @@ void fido_ble_init(void);
 void fido_ble_task(void);
 void fido_wifi_init(void);
 void fido_wifi_task(void);
+#if CONFIG_PICO_FIDO2_AB_OTA
+#include "wifi_ota.h"
+#endif
 
 static void transport_nvs_init(void) {
     esp_err_t err = nvs_flash_init();
@@ -35,6 +38,9 @@ void picokey_extra_transport_task(void) {
 #endif
 #if CONFIG_PICO_FIDO2_WIFI_COMMISSIONING
     fido_wifi_task();
+#endif
+#if CONFIG_PICO_FIDO2_AB_OTA
+    fido_ota_boot_confirm_task();
 #endif
 }
 

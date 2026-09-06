@@ -13,9 +13,11 @@ config PICO_FIDO2_SECURITY_VERSION
     int "Application security version"
     range 0 16
     default 0
-    depends on PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK
+    depends on IDF_TARGET_ESP32S3
     help
-        Security epoch embedded in esp_app_desc. Increment this only when an
-        older signed firmware must be permanently revoked.
+        Security epoch embedded in esp_app_desc. The A/B OTA path uses it to
+        reject an older signed image than the currently running image without
+        writing eFuse. The single-slot anti-rollback path may additionally
+        compare the same epoch with the irreversible SECURE_VERSION eFuse.
 
 endmenu

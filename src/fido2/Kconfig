@@ -78,4 +78,24 @@ config PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC
         While commissioning is active, one BOOT press authorizes exactly one
         persistent or trust-changing portal mutation during this short window.
 
+config PICO_FIDO2_AB_OTA
+    bool "Signed A/B firmware update through maintenance Wi-Fi"
+    default n
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+    help
+        Stream a signed plaintext application to the inactive OTA partition.
+        Secure Boot verifies the image and Flash Encryption encrypts writes
+        with the device-local key. This feature uses ESP-IDF software rollback
+        and does not advance the irreversible SECURE_VERSION eFuse.
+
+config PICO_FIDO2_OTA_CONFIRM_DELAY_SEC
+    int "A/B OTA boot confirmation delay in seconds"
+    range 1 30
+    default 5
+    depends on PICO_FIDO2_AB_OTA
+    help
+        Keep a newly selected OTA image in PENDING_VERIFY until the normal
+        core0 service loop has remained alive for this long. A crash, watchdog
+        reset, or power loss before confirmation causes ESP-IDF to roll back.
+
 endmenu

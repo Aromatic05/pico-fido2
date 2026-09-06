@@ -35,6 +35,9 @@
 #include "wifi_captive_dns.h"
 #include "wifi_management.h"
 #include "wifi_presence_policy.h"
+#if CONFIG_PICO_FIDO2_AB_OTA
+#include "wifi_ota.h"
+#endif
 #if CONFIG_PICO_FIDO2_BLE
 #include "ble_fido.h"
 #endif
@@ -128,17 +131,20 @@ static const char index_html[] =
     "<label>New lock code (32 hex)<br><input id=newLock maxlength=32 autocomplete=off></label>"
     "<label>Confirm new lock code<br><input id=confirmLock maxlength=32 autocomplete=off></label>"
     "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
+    "<div class=card id=otaCard style='display:none'><h2>Firmware update</h2><p class=muted>Signed A/B update. Choose the signed plaintext application .bin, then press BOOT once and install within the physical confirmation window.</p>"
+    "<input id=firmware type=file accept='.bin,application/octet-stream'><button id=updateButton onclick=installUpdate()>Install signed update</button><p id=otaState class=muted></p></div>"
     "<div class=card><h2>Maintenance actions</h2><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
-    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg');"
+    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
-    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.'}"
+    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
     "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
     "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}unlockInput.value='';await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
     "async function changeLock(clear){const p=new URLSearchParams();if(cfg.locked)p.set('unlock',unlockInput.value.trim());if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}unlockInput.value='';newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
     "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
     "async function resetBle(){if(!confirm('Revoke every persisted BLE bond? Existing paired phones/computers will lose trust. One new pairing window will open after restart.'))return;const r=await fetch('/api/ble/bonds/reset',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE bond reset scheduled; restarting into one fresh-pairing window.':(j.error||'BLE bond reset failed.')}"
+    "async function installUpdate(){const f=firmwareInput.files[0];if(!f){msgBox.className='bad';msgBox.textContent='Choose a signed application .bin first.';return}if(!confirm(`Install ${f.name} (${f.size} bytes) into the inactive slot?`))return;updateButton.disabled=true;msgBox.className='muted';msgBox.textContent='Uploading and verifying signed firmware...';try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Pico-CSRF':cfg.csrf},body:f});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Update rejected';updateButton.disabled=false;return}msgBox.className='ok';msgBox.textContent=`Verified ${j.version}, epoch ${j.securityVersion}, in ${j.partition}; restarting.`}catch(e){msgBox.className='bad';msgBox.textContent=String(e);updateButton.disabled=false}}"
     "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
@@ -182,7 +188,30 @@ static esp_err_t status_get(httpd_req_t *req) {
     bool usb_download = !esp_efuse_read_field_bit(
         ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE);
 
-    char body[1152];
+    char ota_json[320];
+#if CONFIG_PICO_FIDO2_AB_OTA
+    fido_ota_status_t ota_status;
+    if (fido_ota_get_status(&ota_status) == ESP_OK) {
+        snprintf(ota_json, sizeof(ota_json),
+                 "{\"enabled\":true,\"ready\":%s,\"softwareRollback\":true,"
+                 "\"confirmationPending\":%s,\"runningPartition\":\"%s\","
+                 "\"nextPartition\":\"%s\",\"slotSize\":%u,\"securityVersion\":%u}",
+                 ota_status.ready ? "true" : "false",
+                 ota_status.confirmation_pending ? "true" : "false",
+                 ota_status.running_partition != NULL ? ota_status.running_partition->label : "",
+                 ota_status.next_partition != NULL ? ota_status.next_partition->label : "",
+                 ota_status.next_partition != NULL ? (unsigned)ota_status.next_partition->size : 0U,
+                 (unsigned)ota_status.current_epoch);
+    }
+    else {
+        snprintf(ota_json, sizeof(ota_json),
+                 "{\"enabled\":true,\"ready\":false,\"softwareRollback\":true}");
+    }
+#else
+    snprintf(ota_json, sizeof(ota_json), "{\"enabled\":false}");
+#endif
+
+    char body[1536];
     int len = snprintf(body, sizeof(body),
         "{\"device\":\"Pico FIDO2\",\"platform\":\"ESP32-S3\","
         "\"version\":\"%u.%u\",\"ssid\":\"%s\","
@@ -195,7 +224,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         "\"secureVersion\":%u,\"romDownload\":%s,"
         "\"usbSerialJtagDownload\":%s},"
         "\"power\":{\"pmReadback\":%s,\"minCpuMHz\":%d,"
-        "\"maxCpuMHz\":%d,\"lightSleep\":%s}}",
+        "\"maxCpuMHz\":%d,\"lightSleep\":%s},\"ota\":%s}",
         PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR, softap_ssid,
 #if CONFIG_PICO_FIDO2_BLE
         fido_ble_is_running() ? "true" : "false",
@@ -223,7 +252,8 @@ static esp_err_t status_get(httpd_req_t *req) {
         pm_readback ? "true" : "false",
         pm.min_freq_mhz,
         pm.max_freq_mhz,
-        pm.light_sleep_enable ? "true" : "false");
+        pm.light_sleep_enable ? "true" : "false",
+        ota_json);
     if (len < 0 || (size_t)len >= sizeof(body)) {
         return json_response(req, "500 Internal Server Error",
                              "{\"error\":\"status encoding overflow\"}");
@@ -486,6 +516,110 @@ static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
     return err;
 }
 
+#if CONFIG_PICO_FIDO2_AB_OTA
+static esp_err_t ota_error_response(httpd_req_t *req, esp_err_t err,
+                                    fido_ota_policy_result_t policy) {
+    if (policy == FIDO_OTA_POLICY_DOWNGRADE) {
+        return json_response(req, "409 Conflict",
+                             "{\"error\":\"signed firmware epoch is older than the running image\"}");
+    }
+    if (policy == FIDO_OTA_POLICY_PROJECT_MISMATCH) {
+        return json_response(req, "400 Bad Request",
+                             "{\"error\":\"signed firmware is for a different project\"}");
+    }
+    if (policy == FIDO_OTA_POLICY_INVALID_EPOCH) {
+        return json_response(req, "400 Bad Request",
+                             "{\"error\":\"signed firmware epoch is outside the supported range\"}");
+    }
+    if (policy == FIDO_OTA_POLICY_INVALID_SIZE || err == ESP_ERR_INVALID_SIZE) {
+        return json_response(req, "413 Payload Too Large",
+                             "{\"error\":\"firmware image does not fit the inactive slot\"}");
+    }
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        return json_response(req, "400 Bad Request",
+                             "{\"error\":\"firmware image or Secure Boot signature validation failed\"}");
+    }
+    if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_OTA_ROLLBACK_INVALID_STATE ||
+        err == ESP_ERR_OTA_PARTITION_CONFLICT) {
+        return json_response(req, "409 Conflict",
+                             "{\"error\":\"A/B update is not ready or the device is busy\"}");
+    }
+    return json_response(req, "500 Internal Server Error",
+                         "{\"error\":\"firmware update failed\"}");
+}
+
+static esp_err_t update_post(httpd_req_t *req) {
+    touch_activity();
+    if (!csrf_valid(req)) {
+        return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
+    }
+    if (req->content_len <= 0) {
+        return json_response(req, "400 Bad Request", "{\"error\":\"empty firmware image\"}");
+    }
+    if (!consume_physical_presence()) {
+        return json_response(req, "428 Precondition Required",
+                             "{\"error\":\"choose the update, press BOOT once, then retry within the physical confirmation window\"}");
+    }
+
+    uint8_t *chunk = malloc(2048);
+    if (chunk == NULL) {
+        return json_response(req, "503 Service Unavailable",
+                             "{\"error\":\"insufficient memory for update buffer\"}");
+    }
+
+    fido_ota_session_t session;
+    fido_ota_policy_result_t policy = FIDO_OTA_POLICY_OK;
+    esp_err_t err = fido_ota_begin(&session, (size_t)req->content_len);
+    if (err != ESP_OK) {
+        free(chunk);
+        return ota_error_response(req, err, policy);
+    }
+
+    size_t remaining = (size_t)req->content_len;
+    while (remaining > 0) {
+        size_t wanted = remaining < 2048 ? remaining : 2048;
+        int received = httpd_req_recv(req, (char *)chunk, wanted);
+        if (received <= 0) {
+            fido_ota_abort(&session);
+            free(chunk);
+            return json_response(req, "408 Request Timeout",
+                                 "{\"error\":\"firmware upload was interrupted\"}");
+        }
+        err = fido_ota_write(&session, chunk, (size_t)received);
+        if (err != ESP_OK) {
+            fido_ota_abort(&session);
+            free(chunk);
+            return ota_error_response(req, err, policy);
+        }
+        remaining -= (size_t)received;
+        touch_activity();
+    }
+    free(chunk);
+
+    fido_ota_result_t result;
+    err = fido_ota_finish(&session, &result, &policy);
+    if (err != ESP_OK) {
+        return ota_error_response(req, err, policy);
+    }
+
+    char response[192];
+    int len = snprintf(response, sizeof(response),
+                       "{\"ok\":true,\"partition\":\"%s\",\"version\":\"%.31s\","
+                       "\"securityVersion\":%u,\"bytes\":%u}",
+                       result.partition->label, result.app_desc.version,
+                       (unsigned)result.app_desc.secure_version,
+                       (unsigned)result.image_size);
+    if (len < 0 || (size_t)len >= sizeof(response)) {
+        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+        return json_response(req, "500 Internal Server Error",
+                             "{\"error\":\"update installed but response encoding failed; device will restart\"}");
+    }
+    esp_err_t response_err = json_response(req, "202 Accepted", response);
+    __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    return response_err;
+}
+#endif
+
 static esp_err_t start_http_server(void) {
     if (http_server != NULL) {
         return ESP_OK;
@@ -493,7 +627,7 @@ static esp_err_t start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_open_sockets = 2;
-    config.max_uri_handlers = 9;
+    config.max_uri_handlers = 10;
     config.backlog_conn = 1;
     config.uri_match_fn = httpd_uri_match_wildcard;
     esp_err_t err = httpd_start(&http_server, &config);
@@ -510,6 +644,9 @@ static esp_err_t start_http_server(void) {
         {.uri = "/api/ble/pairing", .method = HTTP_POST, .handler = ble_pairing_post},
         {.uri = "/api/ble/bonds/reset", .method = HTTP_POST, .handler = ble_bond_reset_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
+#if CONFIG_PICO_FIDO2_AB_OTA
+        {.uri = "/api/update", .method = HTTP_POST, .handler = update_post},
+#endif
         {.uri = "/*", .method = HTTP_GET, .handler = index_get},
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
