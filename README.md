@@ -347,6 +347,8 @@ The final enable-bit ordering has a separate **virtual-only** transaction rehear
 
 `activate-secure-virtual` deliberately has no `--port`. It accepts only the reversible experiment policy (`SECURE_VERSION=0`, recovery paths enabled, exact KEY0/1/3/4 layout), supports resuming the safe intermediate state `SPI_BOOT_CRYPT_CNT=0b001 + Secure Boot off`, and is idempotent once both features are enabled. It refuses an inverted state where Secure Boot is already enabled but Flash Encryption is not at `0b001`. It never writes `SECURE_VERSION`.
 
+The recovery-first secure profile deliberately leaves ESP-IDF `NVS_ENCRYPTION` disabled for now. The current 4 MiB A/B partition table has no `nvs_keys` partition; enabling the flash-encryption-backed NVS security provider without that partition makes ESP-IDF abort during secondary startup before `app_main`. Flash Encryption, Secure Boot, encrypted `otadata`/`part0`, and A/B rollback remain enabled. Adding a deliberate `nvs_keys` layout is a later hardening step, not part of the first recoverable hardware baseline.
+
 The virtual failure-state gate covers full provisioning, idempotency, safe readable-key partial recovery, unreadable KEY1 partial refusal, wrong readable key material, nonzero `SECURE_VERSION`, and the absence of any hardware port option:
 
 ```bash
@@ -478,6 +480,15 @@ The boot-state machine also has an ESP32-S3 QEMU gate that uses real ESP-IDF `ot
 . "$IDF_PATH/export.sh"
 ./tools/test_esp32s3_ab_ota_qemu.sh
 ```
+
+The stricter hardware-operation rehearsal exercises the dangerous sequence through the real QEMU ROM serial protocol rather than only manipulating files: blank-device preflight, exact `burn_key` for KEY0/KEY1/KEY3/KEY4, a ROM flash write/readback probe, host-prepared encrypted A/B baseline staging, `SPI_BOOT_CRYPT_CNT=0b001`, a readback checkpoint, `SECURE_BOOT_EN` last, provisioned KEY3/KEY4 application startup, secured A/B rollback/confirmation, and post-security ROM recovery. It hard-fails if `SECURE_VERSION`, ROM download, USB Serial/JTAG download, pad JTAG, or USB JTAG move away from the recovery-first state. The rehearsal has no physical serial-port argument and cannot address a real board:
+
+```bash
+. "$IDF_PATH/export.sh"
+./tools/test_esp32s3_hardware_rehearsal_qemu.sh
+```
+
+Espressif QEMU cannot reliably transfer the complete 4 MiB encrypted baseline through its flasher stub (`Packet content transfer stopped`), while ROM `--no-stub` is impractically slow for that size. The rehearsal therefore proves a real 4 KiB ROM write/readback and stages the already byte-verified 4 MiB baseline directly into the QEMU flash backing file. All eFuse operations, security activation, secured boot, `otadata` transitions, and the final recovery write are still executed by the emulated ROM/bootloader. The final rescue drill keeps host KEY1 intentionally available, pre-encrypts a signed app for its target slot, raw-writes that ciphertext through ROM, decrypts the readback back to the signed plaintext, and boots it successfully. This is intentionally less hardened but materially safer during the development/provisioning phase.
 
 ### Native host emulation
 
