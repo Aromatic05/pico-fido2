@@ -28,13 +28,13 @@
 #include "mbedtls/constant_time.h"
 #include "mbedtls/platform_util.h"
 
+#include "fido/ctap.h"
 #include "fido/management.h"
 #include "fido/version.h"
 #include "pico_keys.h"
 #include "usb.h"
 #include "wifi_captive_dns.h"
 #include "wifi_management.h"
-#include "wifi_presence_policy.h"
 #if CONFIG_PICO_FIDO2_AB_OTA
 #include "wifi_ota.h"
 #endif
@@ -49,10 +49,9 @@ static char softap_ssid[33];
 static char csrf_token[33];
 static bool commissioning_started;
 static bool restart_requested;
+static bool development_maintenance_requested;
 static TickType_t last_activity_tick;
 static int (*previous_button_pressed_cb)(uint8_t);
-static fido_wifi_presence_policy_t presence_policy;
-static portMUX_TYPE presence_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void touch_activity(void) {
     __atomic_store_n(&last_activity_tick, xTaskGetTickCount(), __ATOMIC_RELEASE);
@@ -102,17 +101,22 @@ static bool csrf_valid(httpd_req_t *req) {
     return valid;
 }
 
-static void grant_physical_presence(void) {
-    portENTER_CRITICAL(&presence_mux);
-    fido_wifi_presence_grant(&presence_policy, board_millis());
-    portEXIT_CRITICAL(&presence_mux);
+static bool request_session_valid(httpd_req_t *req) {
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    (void)req;
+    return true;
+#else
+    return csrf_valid(req);
+#endif
 }
 
-static bool consume_physical_presence(void) {
-    portENTER_CRITICAL(&presence_mux);
-    bool granted = fido_wifi_presence_consume(&presence_policy, board_millis());
-    portEXIT_CRITICAL(&presence_mux);
-    return granted;
+int picokey_vendor_maintenance_start(void) {
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    __atomic_store_n(&development_maintenance_requested, true, __ATOMIC_RELEASE);
+    return CTAP2_OK;
+#else
+    return CTAP2_ERR_UNSUPPORTED_OPTION;
+#endif
 }
 
 static const char index_html[] =
@@ -123,25 +127,24 @@ static const char index_html[] =
     "h1{font-size:26px}h2{font-size:18px;margin-top:28px}.card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin:12px 0}"
     "label{display:block;padding:6px 0}button,input{font:inherit;background:#282828;color:#eee;border:1px solid #555;border-radius:6px;padding:8px 10px}"
     "button{cursor:pointer;margin-right:8px}.muted{color:#999}.bad{color:#ff8b8b}.ok{color:#8bd49c}code{font-family:ui-monospace,monospace}</style></head><body>"
-    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Physical commissioning mode. Persistent or trust-changing actions require one BOOT press immediately before the action.</p>"
+    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Maintenance mode. Development builds can open this portal through the USB development command; production builds require the physical commissioning entry gesture.</p>"
     "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
     "<div class=card><h2>USB applications</h2><div id=apps></div><button onclick=save()>Save configuration</button></div>"
     "<div class=card><h2>Configuration lock</h2><p id=lockState class=muted></p>"
-    "<div id=unlockRow style='display:none'><label>Current lock code (32 hex)<br><input id=unlock maxlength=32 autocomplete=off></label></div>"
     "<label>New lock code (32 hex)<br><input id=newLock maxlength=32 autocomplete=off></label>"
     "<label>Confirm new lock code<br><input id=confirmLock maxlength=32 autocomplete=off></label>"
     "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
-    "<div class=card id=otaCard style='display:none'><h2>Firmware update</h2><p class=muted>Signed A/B update. Choose the signed plaintext application .bin, then press BOOT once and install within the physical confirmation window.</p>"
+    "<div class=card id=otaCard style='display:none'><h2>Firmware update</h2><p class=muted>Signed A/B update. The active maintenance session may install a valid signed application directly.</p>"
     "<input id=firmware type=file accept='.bin,application/octet-stream'><button id=updateButton onclick=installUpdate()>Install signed update</button><p id=otaState class=muted></p></div>"
     "<div class=card><h2>Maintenance actions</h2><span id=bleActions><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button></span><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
-    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),lockRow=document.getElementById('unlockRow'),unlockInput=document.getElementById('unlock'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),bleActions=document.getElementById('bleActions'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
+    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),bleActions=document.getElementById('bleActions'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
     "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
     "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
-    "lockRow.style.display=c.locked?'block':'none';clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'Locked. Current lock code is required for USB changes, lock changes, or clearing.':'Unlocked. Set a 16-byte lock code to protect management changes.';bleActions.style.display=s.bleSupported?'inline':'none';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
+    "clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'USB management lock is set. Maintenance is already authorized and does not require the lock code.':'USB management lock is not set.';bleActions.style.display=s.bleSupported?'inline':'none';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
     "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
-    "const p=new URLSearchParams({enabled:String(enabled)});if(cfg.locked)p.set('unlock',unlockInput.value.trim());const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
-    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}unlockInput.value='';await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
-    "async function changeLock(clear){const p=new URLSearchParams();if(cfg.locked)p.set('unlock',unlockInput.value.trim());if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}unlockInput.value='';newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
+    "const p=new URLSearchParams({enabled:String(enabled)});const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
+    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
+    "async function changeLock(clear){const p=new URLSearchParams();if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
     "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
     "async function resetBle(){if(!confirm('Revoke every persisted BLE bond? Existing paired phones/computers will lose trust. One new pairing window will open after restart.'))return;const r=await fetch('/api/ble/bonds/reset',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE bond reset scheduled; restarting into one fresh-pairing window.':(j.error||'BLE bond reset failed.')}"
     "async function installUpdate(){const f=firmwareInput.files[0];if(!f){msgBox.className='bad';msgBox.textContent='Choose a signed application .bin first.';return}if(!confirm(`Install ${f.name} (${f.size} bytes) into the inactive slot?`))return;updateButton.disabled=true;msgBox.className='muted';msgBox.textContent='Uploading and verifying signed firmware...';try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Pico-CSRF':cfg.csrf},body:f});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Update rejected';updateButton.disabled=false;return}msgBox.className='ok';msgBox.textContent=`Verified ${j.version}, epoch ${j.securityVersion}, in ${j.partition}; restarting.`}catch(e){msgBox.className='bad';msgBox.textContent=String(e);updateButton.disabled=false}}"
@@ -354,7 +357,7 @@ static bool lock_all_zero(const uint8_t lock[MAN_CONFIG_LOCK_LEN]) {
 
 static esp_err_t config_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
     }
     char body[128];
@@ -364,31 +367,18 @@ static esp_err_t config_post(httpd_req_t *req) {
     }
 
     uint16_t enabled = 0;
-    uint8_t unlock[MAN_CONFIG_LOCK_LEN] = {0};
-    bool unlock_present = false;
-    if (!parse_enabled(body, &enabled) ||
-        !parse_lock_parameter(body, "unlock", unlock, &unlock_present)) {
+    if (!parse_enabled(body, &enabled)) {
         mbedtls_platform_zeroize(body, sizeof(body));
-        mbedtls_platform_zeroize(unlock, sizeof(unlock));
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid configuration\"}");
     }
     mbedtls_platform_zeroize(body, sizeof(body));
-    if (!consume_physical_presence()) {
-        mbedtls_platform_zeroize(unlock, sizeof(unlock));
-        return json_response(req, "428 Precondition Required",
-                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
-    }
 
     uint16_t status_word = 0;
     fido_wifi_management_state_t state;
     esp_err_t err = fido_wifi_management_set_enabled(
-        enabled, unlock, unlock_present, &status_word, &state);
-    mbedtls_platform_zeroize(unlock, sizeof(unlock));
+        enabled, NULL, false, &status_word, &state);
     if (err != ESP_OK) {
         return management_transport_error(req, err);
-    }
-    if (status_word == MAN_SW_SECURITY_STATUS_NOT_SATISFIED) {
-        return json_response(req, "403 Forbidden", "{\"error\":\"configuration lock rejected\"}");
     }
     if (status_word != MAN_SW_OK) {
         return json_response(req, "400 Bad Request", "{\"error\":\"configuration rejected\"}");
@@ -403,7 +393,7 @@ static esp_err_t config_post(httpd_req_t *req) {
 
 static esp_err_t config_lock_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
     }
 
@@ -413,41 +403,27 @@ static esp_err_t config_lock_post(httpd_req_t *req) {
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid request body\"}");
     }
 
-    uint8_t unlock[MAN_CONFIG_LOCK_LEN] = {0};
     uint8_t new_lock[MAN_CONFIG_LOCK_LEN] = {0};
-    bool unlock_present = false;
     bool new_lock_present = false;
     char clear_value[4] = {0};
     bool clear = httpd_query_key_value(body, "clear", clear_value,
                                        sizeof(clear_value)) == ESP_OK &&
                  strcmp(clear_value, "1") == 0;
-    bool parsed = parse_lock_parameter(body, "unlock", unlock, &unlock_present) &&
-                  parse_lock_parameter(body, "new", new_lock, &new_lock_present);
+    bool parsed = parse_lock_parameter(body, "new", new_lock, &new_lock_present);
     mbedtls_platform_zeroize(body, sizeof(body));
     if (!parsed || clear == new_lock_present ||
         (new_lock_present && lock_all_zero(new_lock))) {
-        mbedtls_platform_zeroize(unlock, sizeof(unlock));
         mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
         return json_response(req, "400 Bad Request", "{\"error\":\"invalid lock update\"}");
-    }
-    if (!consume_physical_presence()) {
-        mbedtls_platform_zeroize(unlock, sizeof(unlock));
-        mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
-        return json_response(req, "428 Precondition Required",
-                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
     }
 
     uint16_t status_word = 0;
     fido_wifi_management_state_t state;
     esp_err_t err = fido_wifi_management_set_lock(
-        unlock, unlock_present, new_lock, &status_word, &state);
-    mbedtls_platform_zeroize(unlock, sizeof(unlock));
+        NULL, false, new_lock, &status_word, &state);
     mbedtls_platform_zeroize(new_lock, sizeof(new_lock));
     if (err != ESP_OK) {
         return management_transport_error(req, err);
-    }
-    if (status_word == MAN_SW_SECURITY_STATUS_NOT_SATISFIED) {
-        return json_response(req, "403 Forbidden", "{\"error\":\"configuration lock rejected\"}");
     }
     if (status_word != MAN_SW_OK) {
         return json_response(req, "400 Bad Request", "{\"error\":\"lock update rejected\"}");
@@ -460,7 +436,7 @@ static esp_err_t config_lock_post(httpd_req_t *req) {
 
 static esp_err_t reboot_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
     }
     esp_err_t err = json_response(req, "202 Accepted", "{\"ok\":true}");
@@ -473,12 +449,8 @@ static esp_err_t reboot_post(httpd_req_t *req) {
 #if CONFIG_PICO_FIDO2_BLE
 static esp_err_t ble_pairing_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
-    }
-    if (!consume_physical_presence()) {
-        return json_response(req, "428 Precondition Required",
-                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
     }
     esp_err_t err = fido_wifi_management_allow_ble_pairing();
     if (err != ESP_OK) {
@@ -497,12 +469,8 @@ static esp_err_t ble_pairing_post(httpd_req_t *req) {
 
 static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
-    }
-    if (!consume_physical_presence()) {
-        return json_response(req, "428 Precondition Required",
-                             "{\"error\":\"press BOOT once, then retry within the physical confirmation window\"}");
     }
     esp_err_t err = fido_wifi_management_reset_ble_bonds();
     if (err != ESP_OK) {
@@ -554,17 +522,12 @@ static esp_err_t ota_error_response(httpd_req_t *req, esp_err_t err,
 
 static esp_err_t update_post(httpd_req_t *req) {
     touch_activity();
-    if (!csrf_valid(req)) {
+    if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
     }
     if (req->content_len <= 0) {
         return json_response(req, "400 Bad Request", "{\"error\":\"empty firmware image\"}");
     }
-    if (!consume_physical_presence()) {
-        return json_response(req, "428 Precondition Required",
-                             "{\"error\":\"choose the update, press BOOT once, then retry within the physical confirmation window\"}");
-    }
-
     uint8_t *chunk = malloc(2048);
     if (chunk == NULL) {
         return json_response(req, "503 Service Unavailable",
@@ -743,12 +706,17 @@ static void fido_wifi_start(void) {
     wifi_config_t config = {0};
     memcpy(config.ap.ssid, softap_ssid, strlen(softap_ssid));
     config.ap.ssid_len = strlen(softap_ssid);
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    config.ap.authmode = WIFI_AUTH_OPEN;
+    config.ap.pmf_cfg.required = false;
+#else
     strlcpy((char *)config.ap.password, CONFIG_PICO_FIDO2_WIFI_PASSWORD,
             sizeof(config.ap.password));
-    config.ap.channel = CONFIG_PICO_FIDO2_WIFI_CHANNEL;
     config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    config.ap.max_connection = 1;
     config.ap.pmf_cfg.required = true;
+#endif
+    config.ap.channel = CONFIG_PICO_FIDO2_WIFI_CHANNEL;
+    config.ap.max_connection = 1;
 
     err = esp_wifi_set_mode(WIFI_MODE_AP);
     if (err == ESP_OK) {
@@ -796,15 +764,9 @@ static void fido_wifi_start(void) {
 
 static int fido_wifi_button_pressed(uint8_t presses) {
     if (commissioning_started) {
-        if (presses == 1) {
-            grant_physical_presence();
-            touch_activity();
-            ESP_LOGI(TAG, "physical confirmation granted for %d seconds",
-                     CONFIG_PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC);
-        }
-        else {
-            ESP_LOGI(TAG, "ignoring %u BOOT presses while maintenance mode is active",
-                     (unsigned)presses);
+        touch_activity();
+        if (previous_button_pressed_cb) {
+            return previous_button_pressed_cb(presses);
         }
         return 0;
     }
@@ -820,17 +782,23 @@ static int fido_wifi_button_pressed(uint8_t presses) {
 
 void fido_wifi_init(void) {
     ESP_ERROR_CHECK(fido_wifi_management_init());
-    fido_wifi_presence_init(
-        &presence_policy,
-        CONFIG_PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC * 1000U);
     previous_button_pressed_cb = button_pressed_cb;
     button_pressed_cb = fido_wifi_button_pressed;
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    ESP_LOGW(TAG, "development maintenance profile: Wi-Fi can be opened by the unauthenticated USB maintenance command");
+#else
     ESP_LOGI(TAG, "Wi-Fi off; press BOOT %d times to enter commissioning",
              CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES);
+#endif
 }
 
 void fido_wifi_task(void) {
     fido_wifi_management_task();
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    if (__atomic_exchange_n(&development_maintenance_requested, false, __ATOMIC_ACQ_REL)) {
+        fido_wifi_start();
+    }
+#endif
     if (!commissioning_started) {
         return;
     }

@@ -25,6 +25,8 @@ WIFI_OTA_POLICY = ROOT / "src" / "fido2" / "wifi_ota_policy.c"
 WIFI_DEFAULTS = ROOT / "sdkconfig.wifi.defaults"
 WIRELESS_LAYOUT_DEFAULTS = ROOT / "sdkconfig.wireless-layout.defaults"
 SECURE_OTA_DEFAULTS = ROOT / "sdkconfig.secure-ota.defaults"
+DEVELOPMENT_MAINTENANCE_DEFAULTS = ROOT / "sdkconfig.development-maintenance.defaults"
+TRANSPORT_KCONFIG = ROOT / "src" / "fido2" / "Kconfig"
 SECURE_OTA_PARTITIONS = ROOT / "pico-keys-sdk" / "config" / "esp32" / "partitions-secure-ota.csv"
 BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
 SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
@@ -164,8 +166,8 @@ def verify_button_signals() -> None:
     before(wifi, "if (commissioning_started)",
            "if (presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES)",
            "maintenance-mode BOOT routing must take precedence over commissioning entry/OTP routing")
-    require("presses == 1" in wifi and "grant_physical_presence()" in wifi,
-            "exactly one BOOT press in maintenance mode must grant the one-shot mutation confirmation")
+    require("grant_physical_presence" not in wifi,
+            "maintenance-mode BOOT handling must not create a second authorization layer")
     before(otp, "slot == 0 || slot > (EF_OTP_SLOT4 - EF_OTP_SLOT1 + 1)",
            "uint16_t slot_ef = EF_OTP_SLOT1 + slot - 1",
            "OTP button callback must reject out-of-range slots before deriving a file id")
@@ -199,8 +201,13 @@ def verify_wifi_commissioning() -> None:
     bond_reset_post = function_body(source, "ble_bond_reset_post")
     reboot_post = function_body(source, "reboot_post")
     status_get = function_body(source, "status_get")
-    grant_presence = function_body(source, "grant_physical_presence")
-    consume_presence = function_body(source, "consume_physical_presence")
+    init = function_body(source, "fido_wifi_init")
+    task = function_body(source, "fido_wifi_task")
+    dev_start = function_body(source, "picokey_vendor_maintenance_start")
+    button = function_body(source, "fido_wifi_button_pressed")
+    request_session = function_body(source, "request_session_valid")
+    development_defaults = text(DEVELOPMENT_MAINTENANCE_DEFAULTS)
+    transport_kconfig = text(TRANSPORT_KCONFIG)
 
     require("fido_ble_stop_for_commissioning()" in start,
             "Wi-Fi commissioning must fully stop BLE before enabling SoftAP")
@@ -256,38 +263,43 @@ def verify_wifi_commissioning() -> None:
     for secret_marker in ("BLOCK_KEY", "KEY_PURPOSE", "flash_encryption_key", "mkek", "device_key"):
         require(secret_marker not in status_get,
                 f"maintenance status must not expose provisioning/key material: {secret_marker}")
-    require("consume_physical_presence()" in config_post,
-            "persistent USB application changes must consume one physical BOOT confirmation")
-    require("consume_physical_presence()" in pairing_post,
-            "BLE trust changes must consume one physical BOOT confirmation")
-    require("consume_physical_presence()" in lock_post,
-            "configuration-lock changes must consume one physical BOOT confirmation")
-    require("csrf_valid(req)" in lock_post,
-            "configuration-lock changes must require the commissioning CSRF token")
-    require("consume_physical_presence()" in bond_reset_post and
-            "csrf_valid(req)" in bond_reset_post,
-            "BLE bond reset must require both physical confirmation and the commissioning CSRF token")
-    require("consume_physical_presence()" not in reboot_post,
-            "non-persistent maintenance reboot must not consume the mutation confirmation")
-    for label, body in (("grant", grant_presence), ("consume", consume_presence)):
-        require("portENTER_CRITICAL(&presence_mux)" in body and
-                "portEXIT_CRITICAL(&presence_mux)" in body,
-                f"Wi-Fi physical presence {label} must serialize core0 and HTTP task access")
-    require("428 Precondition Required" in config_post and
-            "428 Precondition Required" in pairing_post and
-            "428 Precondition Required" in lock_post and
-            "428 Precondition Required" in bond_reset_post,
-            "mutating maintenance APIs must fail closed when physical confirmation is absent")
-    require("mbedtls_platform_zeroize(unlock" in config_post,
-            "USB configuration unlock material must be zeroized after use")
-    require("mbedtls_platform_zeroize(unlock" in lock_post and
-            "mbedtls_platform_zeroize(new_lock" in lock_post,
-            "configuration-lock old/new material must be zeroized after use")
+    for label, body in (("config", config_post), ("lock", lock_post),
+                        ("pairing", pairing_post), ("bond reset", bond_reset_post),
+                        ("reboot", reboot_post)):
+        require("consume_physical_presence" not in body,
+                f"{label} must not add a second physical authorization inside maintenance")
+        require("request_session_valid(req)" in body,
+                f"{label} must use the common maintenance-session request policy")
+    require("CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in request_session and
+            "return true" in request_session and "csrf_valid(req)" in request_session,
+            "development must bypass portal session authorization while production retains CSRF integrity")
+    require("CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y" in development_defaults,
+            "the dedicated development maintenance defaults must enable open maintenance mode")
+    require("default n" in transport_kconfig and
+            "config PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in transport_kconfig,
+            "open maintenance must remain an explicit opt-in profile, not the production default")
+    require("CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in dev_start and
+            "development_maintenance_requested" in dev_start and
+            "__atomic_store_n" in dev_start,
+            "development mode must expose a software maintenance request without authorization")
+    require("__atomic_exchange_n(&development_maintenance_requested" in task and
+            "fido_wifi_start()" in task,
+            "core0 must consume the development USB request and enter maintenance")
+    require("fido_wifi_start()" not in init,
+            "development mode must keep normal USB/BLE running until maintenance is requested")
+    require("presses >= CONFIG_PICO_FIDO2_WIFI_COMMISSION_PRESSES" in button,
+            "production mode must retain the physical multi-press maintenance entry")
+    require("WIFI_AUTH_OPEN" in start and "WIFI_AUTH_WPA2_PSK" in start,
+            "development and production SoftAP authentication modes must remain explicitly separated")
+    require("mbedtls_platform_zeroize(new_lock" in lock_post,
+            "configuration-lock replacement material must still be zeroized after use")
 
     management = text(WIFI_MANAGEMENT)
     transact = function_body(management, "transact")
     management_init = function_body(management, "fido_wifi_management_init")
     management_task = function_body(management, "fido_wifi_management_task")
+    write_enabled = function_body(management, "write_enabled")
+    write_lock = function_body(management, "write_lock")
     require("xSemaphoreCreateMutex()" in management_init,
             "Wi-Fi management must serialize HTTP request/response transactions")
     require("xSemaphoreTake(transaction_mutex" in transact and
@@ -296,6 +308,9 @@ def verify_wifi_commissioning() -> None:
     require("WIFI_MANAGEMENT_SET_LOCK" in management_task and
             "write_lock(&request)" in management_task,
             "configuration-lock writes must execute through the core0 management task")
+    require("man_write_config_maintenance" in write_enabled and
+            "man_write_config_maintenance" in write_lock,
+            "maintenance portal writes must bypass the USB management lock after maintenance entry")
     before(management_task, "card_try_claim_maintenance()", "write_lock(&request)",
            "configuration-lock writes must claim the global maintenance owner first")
     before(management_task, "write_lock(&request)", "do_flash()",
@@ -349,10 +364,9 @@ def verify_ab_ota() -> None:
     require("# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set" in defaults,
             "secure A/B profile must not enable irreversible eFuse anti-rollback")
 
-    require("csrf_valid(req)" in update_post and "consume_physical_presence()" in update_post,
-            "firmware upload must require both session CSRF and one fresh BOOT confirmation")
-    before(update_post, "consume_physical_presence()", "fido_ota_begin(&session",
-           "physical confirmation must be consumed before opening the OTA write session")
+    require("request_session_valid(req)" in update_post and
+            "consume_physical_presence" not in update_post,
+            "firmware upload must use the active maintenance session without a second BOOT confirmation")
     require("httpd_req_recv" in update_post and "fido_ota_write(&session" in update_post,
             "firmware upload must stream into the bounded OTA writer instead of buffering the image")
 
@@ -735,10 +749,12 @@ def verify_ble_pairing_security() -> None:
     require("BLE_ATT_ERR_INSUFFICIENT_AUTHOR" in access,
             "unauthorized BLE FIDO access must return an explicit ATT authorization failure")
     require("fido_ble_peer_is_bonded" in gap and
-            "fido_ble_pairing_on_connect(&pairing_policy, known_bond)" in gap,
-            "BLE reconnect authorization must be derived from the persistent bond store")
-    require("fido_ble_pairing_repeat_allowed" in gap,
-            "repeat pairing must require the same physical pairing window as a fresh bond")
+            "#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in gap and
+            "known_bond = true" in gap,
+            "production BLE reconnect must use bonds while development can bypass the pairing grant")
+    require("#if !CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in gap and
+            "fido_ble_pairing_repeat_allowed" in gap,
+            "repeat-pairing grant enforcement must remain active outside the development profile")
     require("BLE_GAP_EVENT_PARING_COMPLETE" in gap and
             "BLE_GAP_EVENT_ENC_CHANGE" in gap,
             "fresh-pair rejection must track NimBLE pairing completion through post-persist encryption change")

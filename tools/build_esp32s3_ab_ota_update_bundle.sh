@@ -7,7 +7,7 @@ project_ver="${3:-7.4.1}"
 security_version="${4:-0}"
 build_dir=build-security-ab-ota-update
 sdkconfig=sdkconfig.security-ab-ota-update
-defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
+defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
 slot_capacity=$((0x170000))
 
 fail() {
@@ -42,6 +42,7 @@ for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
     CONFIG_PICO_FIDO2_BLE=y \
     CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
+    CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y \
     CONFIG_PICO_FIDO2_AB_OTA=y \
     CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y \
     CONFIG_PM_ENABLE=y \

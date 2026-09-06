@@ -6,7 +6,7 @@ out_dir="${2:-build-ab-security-bundle}"
 security_version="${3:-0}"
 build_dir=build-security-ab-initial
 sdkconfig=sdkconfig.security-ab-initial
-defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
+defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
 
 fail() {
     echo "ab-security-bundle: $*" >&2
@@ -38,6 +38,7 @@ for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
     CONFIG_PICO_FIDO2_BLE=y \
     CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
+    CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y \
     CONFIG_PICO_FIDO2_AB_OTA=y \
     CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y \
     CONFIG_PM_ENABLE=y \

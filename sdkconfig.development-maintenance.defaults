@@ -1,0 +1,2 @@
+# Development-only maintenance policy.
+CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y

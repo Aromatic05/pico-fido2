@@ -64,7 +64,7 @@ static uint16_t write_enabled(const wifi_management_request_t *request) {
     size_t len = fido_wifi_build_enabled_config(
         wire, sizeof(wire), request->enabled, request->unlock,
         request->unlock_present);
-    uint16_t status = len > 0 ? man_write_config(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
+    uint16_t status = len > 0 ? man_write_config_maintenance(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
     mbedtls_platform_zeroize(wire, sizeof(wire));
     return status;
 }
@@ -74,7 +74,7 @@ static uint16_t write_lock(const wifi_management_request_t *request) {
     size_t len = fido_wifi_build_lock_config(
         wire, sizeof(wire), request->unlock, request->unlock_present,
         request->new_lock);
-    uint16_t status = len > 0 ? man_write_config(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
+    uint16_t status = len > 0 ? man_write_config_maintenance(wire, (uint16_t)len) : MAN_SW_WRONG_DATA;
     mbedtls_platform_zeroize(wire, sizeof(wire));
     return status;
 }

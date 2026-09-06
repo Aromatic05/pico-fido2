@@ -614,6 +614,9 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
         struct ble_gap_conn_desc connect_desc;
         bool known_bond = ble_gap_conn_find(event->connect.conn_handle, &connect_desc) == 0 &&
                           fido_ble_peer_is_bonded(&connect_desc.peer_id_addr);
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+        known_bond = true;
+#endif
         fido_ble_pairing_on_connect(&pairing_policy, known_bond);
         if (!fido_ble_request_pending()) {
             xSemaphoreTake(rx_mutex, portMAX_DELAY);
@@ -667,10 +670,12 @@ static int fido_ble_gap_event(struct ble_gap_event *event, void *arg) {
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
+#if !CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
         if (!fido_ble_pairing_repeat_allowed(&pairing_policy, board_millis())) {
             ESP_LOGW(TAG, "repeat pairing rejected outside maintenance pairing window");
             return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
+#endif
         struct ble_gap_conn_desc desc;
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             if (ble_store_util_delete_peer(&desc.peer_id_addr) == 0) {
@@ -882,6 +887,11 @@ void fido_ble_init(void) {
         CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC * 1000U,
         pairing_grant,
         board_millis());
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    {
+        ESP_LOGW(TAG, "development maintenance profile: fresh BLE pairing grant checks disabled");
+    }
+#else
     if (pairing_grant) {
         ESP_LOGI(TAG, "fresh BLE pairing enabled for %d seconds",
                  CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
@@ -889,6 +899,7 @@ void fido_ble_init(void) {
     else {
         ESP_LOGI(TAG, "fresh BLE pairing disabled; existing bonds remain available");
     }
+#endif
     nimble_port_freertos_init(fido_ble_host_task);
     __atomic_store_n(&ble_stack_running, true, __ATOMIC_RELEASE);
 }

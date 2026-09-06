@@ -34,6 +34,17 @@ config PICO_FIDO2_WIFI_COMMISSIONING
         status and reuses the YubiKey management configuration/lock semantics
         for USB application enablement.
 
+config PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    bool "Development maintenance profile"
+    default n
+    depends on PICO_FIDO2_WIFI_COMMISSIONING
+    help
+        Development-only profile. Allow an unauthenticated USB vendor command
+        to open the maintenance SoftAP without a button gesture, use an open
+        SoftAP, and treat the active maintenance session as already authorized
+        for portal mutations. Secure Boot image validation, Flash Encryption,
+        and A/B rollback are unchanged.
+
 config PICO_FIDO2_WIFI_SSID_PREFIX
     string "Commissioning SoftAP SSID prefix"
     default "PicoFIDO2"
@@ -68,15 +79,6 @@ config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
     help
         Reboot after this much commissioning inactivity. Reboot exits Wi-Fi
         maintenance mode and restores the normal BLE FIDO transport.
-
-config PICO_FIDO2_WIFI_PRESENCE_WINDOW_SEC
-    int "Physical confirmation window in seconds"
-    range 5 60
-    default 15
-    depends on PICO_FIDO2_WIFI_COMMISSIONING
-    help
-        While commissioning is active, one BOOT press authorizes exactly one
-        persistent or trust-changing portal mutation during this short window.
 
 config PICO_FIDO2_AB_OTA
     bool "Signed A/B firmware update through maintenance Wi-Fi"
