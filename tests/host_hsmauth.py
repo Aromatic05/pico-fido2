@@ -328,6 +328,16 @@ def run(binary: Path) -> None:
             if session.get_public_key(ec_label).public_numbers() != ec_private.public_key().public_numbers():
                 raise AssertionError("GET_PUBLIC_KEY does not match imported EC credential")
 
+            generated_label = "ec-generated"
+            generated_credential = session.generate_credential_asymmetric(
+                DEFAULT_MANAGEMENT_KEY,
+                generated_label,
+                password,
+            )
+            if generated_credential.algorithm != ALGORITHM.EC_P256_YUBICO_AUTHENTICATION:
+                raise AssertionError("wrong algorithm returned after asymmetric GENERATE")
+            generated_public = session.get_public_key(generated_label).public_numbers()
+
             emulator.hard_kill()
             emulator = Emulator(binary, run_dir)
             emulator.start()
@@ -335,6 +345,8 @@ def run(binary: Path) -> None:
             session = HsmAuthSession(TcpSmartCardConnection(emulator.ccid))
             if session.get_public_key(ec_label).public_numbers() != ec_private.public_key().public_numbers():
                 raise AssertionError("EC credential was not durable across power loss")
+            if session.get_public_key(generated_label).public_numbers() != generated_public:
+                raise AssertionError("device-generated EC credential was not durable across power loss")
 
             stale_epk_oce = session.get_challenge(ec_label)
             if len(stale_epk_oce) != 65 or stale_epk_oce[0] != 0x04:
@@ -448,6 +460,9 @@ def run(binary: Path) -> None:
             session.delete_credential(DEFAULT_MANAGEMENT_KEY, ec_label)
             if any(c.label == ec_label for c in session.list_credentials()):
                 raise AssertionError("asymmetric DELETE did not remove credential")
+            session.delete_credential(DEFAULT_MANAGEMENT_KEY, generated_label)
+            if any(c.label == generated_label for c in session.list_credentials()):
+                raise AssertionError("generated asymmetric DELETE did not remove credential")
         finally:
             emulator.stop()
 

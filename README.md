@@ -454,7 +454,15 @@ YubiHSM Auth compatibility is driven through stock `yubikit` against the same na
 python tests/host_hsmauth.py build-host/pico_fido2
 ```
 
-The gate covers AES-128/SCP03 and P-256/SCP11 credentials, management and credential retry counters, public-key retrieval, challenge/session-key calculation, receipt verification, and immediate power-loss durability. The asymmetric path independently simulates the YubiHSM side's static and ephemeral ECDH operations and verifies the returned S-ENC/S-MAC/S-RMAC keys against the X9.63-SHA256 derivation instead of accepting a self-derived result.
+The gate covers AES-128/SCP03 and P-256/SCP11 credentials, imported and device-generated P-256 private keys, management and credential retry counters, public-key retrieval, challenge/session-key calculation, receipt verification, and immediate power-loss durability. A generated private key is never returned: the test stores its public key, kills the emulator immediately, then proves the same public identity survives the next power cycle. The asymmetric path independently simulates the YubiHSM side's static and ephemeral ECDH operations and verifies the returned S-ENC/S-MAC/S-RMAC keys against the X9.63-SHA256 derivation instead of accepting a self-derived result.
+
+The user-facing `ykman hsmauth` command set is also exercised through stock YubiKey Manager 5.9.2 in an isolated container:
+
+```bash
+./tools/test_ykman_hsmauth_container.sh
+```
+
+That gate covers symmetric and password-derived credential import, on-device P-256 generation/export, P-256 private-key import/export identity, power-cycle persistence, management-password change and retry accounting, delete/list, and factory reset. It uses only the native emulator; no physical YubiKey or ESP32-S3 is accessed.
 
 Mutating commands also have a hard power-loss durability gate. It waits only for the protocol success response, immediately sends `SIGKILL`, and then restarts against the same `memory.flash`:
 
