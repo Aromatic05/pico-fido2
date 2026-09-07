@@ -25,6 +25,16 @@ config PICO_FIDO2_BLE_PAIRING_WINDOW_SEC
         A fresh BLE bond is accepted only during a one-time maintenance-granted
         pairing window. Existing bonded peers remain usable outside the window.
 
+config PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC
+    int "BOOT user-presence timeout in seconds"
+    range 5 60
+    default 15
+    depends on IDF_TARGET_ESP32S3
+    help
+        Require a physical BOOT press for FIDO/U2F and other operations that
+        request user presence. This is a runtime product policy and is not
+        persisted into the user's PicoKeys PHY configuration.
+
 config PICO_FIDO2_WIFI_COMMISSIONING
     bool "Wi-Fi commissioning SoftAP"
     default n
@@ -74,7 +84,7 @@ config PICO_FIDO2_WIFI_COMMISSION_PRESSES
 config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC
     int "Commissioning idle timeout in seconds"
     range 30 3600
-    default 300
+    default 600
     depends on PICO_FIDO2_WIFI_COMMISSIONING
     help
         Reboot after this much commissioning inactivity. Reboot exits Wi-Fi

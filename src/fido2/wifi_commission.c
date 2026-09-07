@@ -31,6 +31,7 @@
 #include "fido/ctap.h"
 #include "fido/management.h"
 #include "fido/version.h"
+#include "led/led.h"
 #include "pico_keys.h"
 #include "usb.h"
 #include "wifi_captive_dns.h"
@@ -135,6 +136,7 @@ static esp_err_t management_transport_error(httpd_req_t *req, esp_err_t err) {
     return json_response(req, "500 Internal Server Error", "{\"error\":\"management failure\"}");
 }
 
+#if !CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
 static bool csrf_valid(httpd_req_t *req) {
     char header[sizeof(csrf_token)];
     if (httpd_req_get_hdr_value_str(req, "X-Pico-CSRF", header, sizeof(header)) != ESP_OK) {
@@ -145,6 +147,7 @@ static bool csrf_valid(httpd_req_t *req) {
     mbedtls_platform_zeroize(header, sizeof(header));
     return valid;
 }
+#endif
 
 static bool request_session_valid(httpd_req_t *req) {
 #if CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
@@ -164,43 +167,14 @@ int picokey_vendor_maintenance_start(void) {
 #endif
 }
 
-static const char index_html[] =
-    "<!doctype html><html><head><meta charset=utf-8>"
-    "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>Pico FIDO2 Maintenance</title>"
-    "<style>body{font:15px system-ui;margin:32px auto;max-width:760px;padding:0 18px;color:#ddd;background:#111}"
-    "h1{font-size:26px}h2{font-size:18px;margin-top:28px}.card{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:16px;margin:12px 0}"
-    "label{display:block;padding:6px 0}button,input{font:inherit;background:#282828;color:#eee;border:1px solid #555;border-radius:6px;padding:8px 10px}"
-    "button{cursor:pointer;margin-right:8px}.muted{color:#999}.bad{color:#ff8b8b}.ok{color:#8bd49c}code{font-family:ui-monospace,monospace}</style></head><body>"
-    "<h1>Pico FIDO2 Maintenance</h1><p class=muted>Maintenance mode. Development builds can open this portal through the USB development command; production builds require the physical commissioning entry gesture.</p>"
-    "<div class=card><h2>Device</h2><pre id=status>loading...</pre></div>"
-    "<div class=card><h2>USB applications</h2><div id=apps></div><button onclick=save()>Save configuration</button></div>"
-    "<div class=card><h2>Configuration lock</h2><p id=lockState class=muted></p>"
-    "<label>New lock code (32 hex)<br><input id=newLock maxlength=32 autocomplete=off></label>"
-    "<label>Confirm new lock code<br><input id=confirmLock maxlength=32 autocomplete=off></label>"
-    "<button onclick=changeLock(false)>Set/change lock</button><button id=clearLockButton onclick=changeLock(true)>Clear lock</button></div>"
-    "<div class=card id=otaCard style='display:none'><h2>Firmware update</h2><p class=muted>Signed A/B update. The active maintenance session may install a valid signed application directly.</p>"
-    "<input id=firmware type=file accept='.bin,application/octet-stream'><button id=updateButton onclick=installUpdate()>Install signed update</button><p id=otaState class=muted></p></div>"
-    "<div class=card><h2>Maintenance actions</h2><span id=bleActions><button onclick=pairBle()>Allow BLE pairing</button><button onclick=resetBle()>Reset BLE bonds + pair</button></span><button onclick=reboot()>Restart device</button><p id=msg class=muted></p></div>"
-    "<script>const caps=[['OTP',1],['U2F',2],['OpenPGP',8],['PIV',16],['OATH',32],['HSM Auth',256],['FIDO2',512],['Management',1024]];let cfg;const st=document.getElementById('status'),appBox=document.getElementById('apps'),newLockInput=document.getElementById('newLock'),confirmLockInput=document.getElementById('confirmLock'),lockState=document.getElementById('lockState'),clearLockButton=document.getElementById('clearLockButton'),msgBox=document.getElementById('msg'),bleActions=document.getElementById('bleActions'),otaCard=document.getElementById('otaCard'),firmwareInput=document.getElementById('firmware'),updateButton=document.getElementById('updateButton'),otaState=document.getElementById('otaState');"
-    "async function load(){const [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/config').then(r=>r.json())]);cfg=c;"
-    "st.textContent=JSON.stringify(s,null,2);appBox.innerHTML='';for(const [n,b] of caps){const l=document.createElement('label');const x=document.createElement('input');x.type='checkbox';x.dataset.bit=b;x.checked=!!(c.enabled&b);x.disabled=!(c.supported&b);l.append(x,' '+n);appBox.append(l)}"
-    "clearLockButton.style.display=c.locked?'inline-block':'none';lockState.textContent=c.locked?'USB management lock is set. Maintenance is already authorized and does not require the lock code.':'USB management lock is not set.';bleActions.style.display=s.bleSupported?'inline':'none';const o=s.ota||{};otaCard.style.display=o.enabled?'block':'none';if(o.enabled)otaState.textContent=o.ready?`Running ${o.runningPartition}; next update slot ${o.nextPartition}; epoch ${o.securityVersion}.`:(o.confirmationPending?'New image is still in rollback verification window.':'OTA requires active Secure Boot + Flash Encryption and two OTA slots.')}"
-    "async function save(){let enabled=0;for(const x of appBox.querySelectorAll('input'))if(x.checked)enabled|=+x.dataset.bit;if(!(enabled&(1|2|512|1024))){msgBox.className='bad';msgBox.textContent='Keep at least one management-capable USB transport enabled.';return}"
-    "const p=new URLSearchParams({enabled:String(enabled)});const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();"
-    "if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Save failed';return}await load();msgBox.className='ok';msgBox.textContent='Saved to flash. Restart to apply USB interface changes.'}"
-    "async function changeLock(clear){const p=new URLSearchParams();if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
-    "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
-    "async function resetBle(){if(!confirm('Revoke every persisted BLE bond? Existing paired phones/computers will lose trust. One new pairing window will open after restart.'))return;const r=await fetch('/api/ble/bonds/reset',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE bond reset scheduled; restarting into one fresh-pairing window.':(j.error||'BLE bond reset failed.')}"
-    "async function installUpdate(){const f=firmwareInput.files[0];if(!f){msgBox.className='bad';msgBox.textContent='Choose a signed application .bin first.';return}if(!confirm(`Install ${f.name} (${f.size} bytes) into the inactive slot?`))return;updateButton.disabled=true;msgBox.className='muted';msgBox.textContent='Uploading and verifying signed firmware...';try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Pico-CSRF':cfg.csrf},body:f});if(!r.ok){const j=await r.json();msgBox.className='bad';msgBox.textContent=j.error||'Update rejected';updateButton.disabled=false;return}const v=r.headers.get('X-Pico-Version')||'new image',p=r.headers.get('X-Pico-Partition')||'inactive slot',e=r.headers.get('X-Pico-Security-Version')||'?';msgBox.className='ok';msgBox.textContent=`Verified ${v}, epoch ${e}, in ${p}; restarting.`}catch(e){msgBox.className='bad';msgBox.textContent=String(e);updateButton.disabled=false}}"
-    "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
-    "</body></html>";
+extern const char wifi_portal_html_start[] asm("_binary_wifi_portal_html_start");
+extern const char wifi_portal_html_end[] asm("_binary_wifi_portal_html_end");
 
 static esp_err_t index_get(httpd_req_t *req) {
     touch_activity();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, index_html, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, wifi_portal_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_get(httpd_req_t *req) {
@@ -792,6 +766,7 @@ static void fido_wifi_start(void) {
         ESP_LOGW(TAG, "SoftAP IP readback failed: %s", esp_err_to_name(err));
     }
     commissioning_started = true;
+    led_state_transition(LED_EVENT_MAINTENANCE_BEGIN);
     touch_activity();
 
     ESP_LOGI(TAG, "commissioning AP %s started; HTTP starts after station join", softap_ssid);

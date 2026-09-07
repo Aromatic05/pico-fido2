@@ -17,8 +17,10 @@ APDU = SDK / "apdu.c"
 HWRNG = SDK / "rng" / "hwrng.c"
 EMULATION = SDK / "usb" / "emulation" / "emulation.c"
 LED = SDK / "led" / "led.c"
+LED_H = SDK / "led" / "led.h"
 BLE = ROOT / "src" / "fido2" / "ble_fido.c"
 WIFI_COMMISSION = ROOT / "src" / "fido2" / "wifi_commission.c"
+WIFI_PORTAL = ROOT / "src" / "fido2" / "wifi_portal.html"
 WIFI_MANAGEMENT = ROOT / "src" / "fido2" / "wifi_management.c"
 WIFI_OTA = ROOT / "src" / "fido2" / "wifi_ota.c"
 WIFI_OTA_POLICY = ROOT / "src" / "fido2" / "wifi_ota_policy.c"
@@ -28,6 +30,7 @@ SECURE_OTA_DEFAULTS = ROOT / "sdkconfig.secure-ota.defaults"
 SECURITY_PREPROVISIONED_DEFAULTS = ROOT / "sdkconfig.security-preprovisioned.defaults"
 DEVELOPMENT_MAINTENANCE_DEFAULTS = ROOT / "sdkconfig.development-maintenance.defaults"
 PHYSICAL_ESP32S3_DEFAULTS = ROOT / "sdkconfig.esp32s3-physical.defaults"
+ESP32S3_BRINGUP = ROOT / "tools" / "esp32s3_bringup.sh"
 TRANSPORT_KCONFIG = ROOT / "src" / "fido2" / "Kconfig"
 FIDO2_CMAKE = ROOT / "src" / "fido2" / "CMakeLists.txt"
 ESP32_TRANSPORTS = ROOT / "src" / "fido2" / "esp32_transports.c"
@@ -37,6 +40,7 @@ SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
 UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_update_bundle.sh"
 AB_SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_security_bundle.sh"
 AB_UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_ota_update_bundle.sh"
+MAINTENANCE_PROFILE = ROOT / "tools" / "esp32s3_maintenance_profile.sh"
 PROVISION_TOOL = ROOT / "tools" / "esp32s3_provision.py"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
@@ -194,6 +198,9 @@ def verify_hwrng_state() -> None:
 
 def verify_wifi_commissioning() -> None:
     source = text(WIFI_COMMISSION)
+    portal = text(WIFI_PORTAL)
+    led = text(LED)
+    led_h = text(LED_H)
     ble = text(BLE)
     defaults = text(WIFI_DEFAULTS)
     wireless_layout = text(WIRELESS_LAYOUT_DEFAULTS)
@@ -216,6 +223,9 @@ def verify_wifi_commissioning() -> None:
     request_session = function_body(source, "request_session_valid")
     development_defaults = text(DEVELOPMENT_MAINTENANCE_DEFAULTS)
     transport_kconfig = text(TRANSPORT_KCONFIG)
+    fido2_cmake = text(FIDO2_CMAKE)
+    esp32_transports = text(ESP32_TRANSPORTS)
+    maintenance_profile = text(MAINTENANCE_PROFILE)
 
     require("fido_ble_stop_for_commissioning()" in start,
             "Wi-Fi commissioning must fully stop BLE before enabling SoftAP")
@@ -309,6 +319,62 @@ def verify_wifi_commissioning() -> None:
             "production mode must retain the physical multi-press maintenance entry")
     require("WIFI_AUTH_OPEN" in start and "WIFI_AUTH_WPA2_PSK" in start,
             "development and production SoftAP authentication modes must remain explicitly separated")
+    for marker in ("LED_BASE_NORMAL_IDLE", "LED_BASE_USB_SUSPENDED", "LED_BASE_PROCESSING",
+                   "LED_BASE_MAINTENANCE", "LED_INTERACTION_WAITING_TOUCH",
+                   "LED_INTERACTION_TOUCH_ACCEPTED", "LED_EVENT_MAINTENANCE_BEGIN"):
+        require(marker in led_h, f"semantic LED state API must expose {marker}")
+    require("RENDER_NORMAL_IDLE" in led and "LED_COLOR_BLUE" in led and
+            "RENDER_MAINTENANCE" in led and "LED_COLOR_GREEN" in led and
+            "RENDER_PROCESSING" in led and "LED_COLOR_CYAN" in led and
+            "RENDER_WAITING_TOUCH" in led and "LED_COLOR_YELLOW" in led,
+            "LED renderer must map semantic states to the approved blue/green/cyan/yellow contract")
+    transition = function_body(led, "led_state_transition")
+    require("__atomic_compare_exchange_n(&led_state_word" in transition,
+            "LED base+interaction transitions must commit atomically with CAS")
+    require("base != LED_BASE_MAINTENANCE" in transition and
+            "case LED_EVENT_PROCESSING_BEGIN" in transition,
+            "maintenance must be a modal base state that processing events cannot steal")
+    blink = function_body(led, "led_blinking_task")
+    require("bool steady = led_off == 0" in blink and
+            "float progress = steady ? 1.f : 0.f" in blink and
+            "if (!steady && now >= stop_ms)" in blink,
+            "zero-off LED modes must be rendered as true steady colors rather than degenerate blink cycles")
+    require("LED_TOUCH_WHITE_1_MS" in led and "LED_TOUCH_DARK_MS" in led and
+            "LED_TOUCH_WHITE_2_MS" in led and "LED_COLOR_WHITE" in blink,
+            "accepted physical presence must render as non-blocking white-double-flash feedback")
+    require("led_state_transition(LED_EVENT_MAINTENANCE_BEGIN);" in start,
+            "successful maintenance startup must switch the LED baseline to green")
+    before(start, "esp_wifi_start()", "led_state_transition(LED_EVENT_MAINTENANCE_BEGIN);",
+           "maintenance LED must not turn green before the SoftAP has actually started")
+    require("HTTPD_RESP_USE_STRLEN" in function_body(source, "index_get"),
+            "embedded maintenance HTML must not include the linker-added trailing NUL in HTTP responses")
+    idle_kconfig = transport_kconfig[
+        transport_kconfig.index("config PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC"):
+        transport_kconfig.index("config PICO_FIDO2_AB_OTA")
+    ]
+    require("default 600" in idle_kconfig,
+            "production maintenance must default to a ten-minute idle timeout")
+    presence_kconfig = transport_kconfig[
+        transport_kconfig.index("config PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC"):
+        transport_kconfig.index("config PICO_FIDO2_WIFI_COMMISSIONING")
+    ]
+    require("default 15" in presence_kconfig and
+            "phy_data.up_btn = CONFIG_PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC" in esp32_transports and
+            "phy_data.up_btn_present = true" in esp32_transports,
+            "ESP32-S3 product policy must require a runtime 15-second BOOT user-presence window")
+    require("EMBED_TXTFILES wifi_portal.html" in fido2_cmake and
+            "_binary_wifi_portal_html_start" in source and
+            "static const char index_html" not in source,
+            "maintenance UI must be a standalone embedded HTML asset rather than a C string")
+    for marker in ("appsFeedback", "lockFeedback", "bleFeedback", "otaFeedback",
+                   "maintenanceFeedback", "Saving…", "Uploading…", "Restarting…"):
+        require(marker in portal, f"maintenance portal must expose local action feedback: {marker}")
+    require("PICO_FIDO2_WIFI_PASSWORD_FILE" in maintenance_profile and
+            "CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=600" in maintenance_profile and
+            "CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN is not set" in maintenance_profile,
+            "production profile must inject a local fixed WPA2 password and disable open maintenance")
+    require("sdkconfig.development-maintenance.defaults" in maintenance_profile,
+            "development maintenance must remain available as an explicit build profile")
     require("mbedtls_platform_zeroize(new_lock" in lock_post,
             "configuration-lock replacement material must still be zeroized after use")
 
@@ -472,22 +538,60 @@ def verify_emulator_arbiter() -> None:
 
 def verify_runtime_ui_state() -> None:
     led_source = text(LED)
+    usb_source = text(USB)
+    ccid_source = text(CCID)
+    main_source = text(MAIN)
+    apdu_source = text(APDU)
     config_source = text(CBOR_CONFIG)
-    set_mode = function_body(led_source, "led_set_mode")
-    get_mode = function_body(led_source, "led_get_mode")
+    transition = function_body(led_source, "led_state_transition")
+    snapshot = function_body(led_source, "led_state_snapshot")
     blink = function_body(led_source, "led_blinking_task")
-    require("__atomic_store_n(&led_mode" in set_mode,
-            "LED mode is written by workers and must use an atomic store")
-    require("__atomic_load_n(&led_mode" in get_mode,
-            "LED mode is read by the main task and must use an atomic load")
-    require("uint32_t mode = led_get_mode()" in blink,
-            "LED task must snapshot LED mode once per tick")
-    require(re.search(r"\bled_mode\b", blink) is None,
-            "LED task must not bypass the atomic led_get_mode snapshot")
+    suspend_cb = function_body(usb_source, "tud_suspend_cb")
+    card_exit = function_body(usb_source, "card_exit_unchecked")
+    claim = function_body(usb_source, "card_try_claim")
+    release = function_body(usb_source, "card_release")
+    wait_button = function_body(main_source, "wait_button")
+    require("__atomic_compare_exchange_n(&led_state_word" in transition,
+            "LED transitions must atomically update base+interaction as one state word")
+    require("__atomic_load_n(&led_state_word" in snapshot,
+            "LED renderer snapshots must atomically observe the state word")
+    require("led_state_snapshot_t snapshot = led_state_snapshot()" in blink,
+            "LED renderer must derive output from a semantic state snapshot")
     require("__atomic_load_n(&phy_data.opts" in blink,
             "runtime PHY options read by LED task must be atomic")
     require("__atomic_store_n(&phy_data.opts" in config_source,
             "runtime vendor PHY option updates must use an atomic store")
+    require("LED_EVENT_USB_SUSPENDED" in suspend_cb,
+            "true USB bus suspend must retain the blue slow-blink state")
+    require("LED_EVENT_PROCESSING_BEGIN" in claim and "LED_EVENT_PROCESSING_END" in release,
+            "command ownership claim/release must bracket the processing base state")
+    require("LED_EVENT_PROCESSING_END" not in card_exit,
+            "worker teardown must not end processing before command ownership is released")
+    for label, source in (("USB", usb_source), ("CCID", ccid_source),
+                          ("APDU", apdu_source), ("button", main_source)):
+        for forbidden in ("led_set_mode", "MODE_MOUNTED", "MODE_SUSPENDED",
+                          "MODE_PROCESSING", "MODE_BUTTON", "MODE_MAINTENANCE"):
+            require(forbidden not in source,
+                    f"{label} business logic must not write presentation-level LED mode {forbidden}")
+    require("if (button_timeout == 0)" in wait_button and "return true" in wait_button,
+            "missing user-presence policy must fail closed rather than impersonate a touch")
+    require("LED_EVENT_TOUCH_WAIT_BEGIN" in wait_button and
+            "LED_EVENT_TOUCH_ACCEPTED" in wait_button and
+            "LED_EVENT_TOUCH_CANCELLED" in wait_button,
+            "physical button lifecycle must drive explicit waiting/accepted/cancelled interaction states")
+    require(wait_button.count("led_blinking_task();") == 2,
+            "both blocking touch-wait loops must cooperatively service the LED renderer")
+    before(wait_button, "LED_EVENT_TOUCH_WAIT_BEGIN", "led_blinking_task();",
+           "touch interaction must enter WAITING before the first cooperative renderer tick")
+    make_credential = function_body(text(MAKE_CREDENTIAL), "cbor_make_credential")
+    up_start = make_credential.index("if (options.up == ptrue || options.up == NULL)")
+    up_end = make_credential.index("static uint8_t cred_id", up_start)
+    make_up = make_credential[up_start:up_end]
+    require("else {\n            if (!(flags & FIDO2_AUT_FLAG_UP))" in make_up and
+            "check_user_presence() == false" in make_up,
+            "MakeCredential without PIN auth must still require physical user presence")
+    before(make_up, "check_user_presence() == false", "flags |= FIDO2_AUT_FLAG_UP",
+           "MakeCredential must not assert the UP flag before a physical presence check")
 
 
 def verify_hid_adapter() -> None:
@@ -1046,10 +1150,13 @@ def verify_secure_builder_key_binding() -> None:
 
 def verify_physical_flash_mode() -> None:
     defaults = text(PHYSICAL_ESP32S3_DEFAULTS)
+    bringup = text(ESP32S3_BRINGUP)
     require("CONFIG_ESPTOOLPY_FLASHMODE_DIO=y" in defaults,
             "physical ESP32-S3 profile must force DIO")
     require("# CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT is not set" in defaults,
             "physical ESP32-S3 profile must disable flash auto-detection")
+    require("CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=600" in bringup,
+            "physical bring-up safety gate must accept the approved ten-minute maintenance timeout")
     for path in (SECURITY_BUNDLE, UPDATE_BUNDLE, AB_SECURITY_BUNDLE, AB_UPDATE_BUNDLE):
         source = text(path)
         label = path.name

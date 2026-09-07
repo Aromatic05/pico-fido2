@@ -5,10 +5,13 @@ provision_dir="${1:-build-provisioning}"
 out_dir="${2:-build-ab-ota-update}"
 project_ver="${3:-7.4.1}"
 security_version="${4:-0}"
+maintenance_profile="${5:-development}"
 build_dir=build-security-ab-ota-update
 sdkconfig=sdkconfig.security-ab-ota-update
-defaults='sdkconfig.defaults;sdkconfig.esp32s3-physical.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
+defaults='sdkconfig.defaults;sdkconfig.esp32s3-physical.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
 slot_capacity=$((0x170000))
+
+source ./tools/esp32s3_maintenance_profile.sh
 
 fail() {
     echo "ab-ota-update: $*" >&2
@@ -28,11 +31,13 @@ provision_dir="$(realpath "$provision_dir")"
 rm -rf "$build_dir" "$out_dir"
 rm -f "$sdkconfig" "$sdkconfig.old"
 mkdir -p "$out_dir"
+maintenance_defaults="$(prepare_maintenance_profile_defaults "$maintenance_profile" "$out_dir")" \
+    || fail 'maintenance profile preparation failed'
 version_defaults="$out_dir/.security-version.defaults"
 signing_defaults="$out_dir/.signing-key.defaults"
 printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$security_version" >"$version_defaults"
 printf 'CONFIG_SECURE_BOOT_SIGNING_KEY="%s/secure_boot_signing_key.pem"\n' "$provision_dir" >"$signing_defaults"
-build_defaults="${defaults};${signing_defaults};${version_defaults}"
+build_defaults="${defaults};${maintenance_defaults};${signing_defaults};${version_defaults}"
 
 SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
     -DPROJECT_VER="$project_ver" set-target esp32s3 >/dev/null
@@ -43,7 +48,6 @@ for expected in \
     CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y \
     CONFIG_PICO_FIDO2_BLE=y \
     CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
-    CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y \
     CONFIG_PICO_FIDO2_AB_OTA=y \
     CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y \
     CONFIG_ESPTOOLPY_FLASHMODE_DIO=y \
@@ -61,6 +65,8 @@ for expected in \
     CONFIG_PICO_FIDO2_SECURITY_VERSION=${security_version}; do
     grep -qx "$expected" "$sdkconfig" || fail "missing config: $expected"
 done
+assert_maintenance_profile "$sdkconfig" "$maintenance_profile" \
+    || fail "maintenance profile mismatch: $maintenance_profile"
 if grep -qx 'CONFIG_PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK=y' "$sdkconfig"; then
     fail 'A/B OTA update build unexpectedly enables the single-slot anti-rollback wrapper'
 fi
@@ -144,6 +150,7 @@ PY
 
 printf 'A/B OTA update bundle: PASS\n'
 printf 'Version: %s\n' "$project_ver"
+printf 'Maintenance profile: %s\n' "$maintenance_profile"
 printf 'Security version: %s\n' "$security_version"
 printf 'Signed plaintext: %s bytes\n' "$(stat -c %s "$artifact")"
 printf 'Slot capacity: %s bytes\n' "$slot_capacity"

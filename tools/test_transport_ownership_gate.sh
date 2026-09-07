@@ -6,6 +6,7 @@ cd "$ROOT"
 
 python tests/formal_state_model.py
 python tests/button_press_model.py
+python tests/led_state_machine_model.py
 python tests/source_ownership_contracts.py
 python tests/yubikey_profile_contracts.py
 python tests/sdkconfig_contracts.py

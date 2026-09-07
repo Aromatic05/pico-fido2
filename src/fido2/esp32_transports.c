@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "nvs_flash.h"
+#include "phy.h"
 
 void fido_ble_init(void);
 void fido_ble_task(void);
@@ -23,6 +24,8 @@ static void transport_nvs_init(void) {
 }
 
 void picokey_extra_transport_init(void) {
+    phy_data.up_btn = CONFIG_PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC;
+    phy_data.up_btn_present = true;
     transport_nvs_init();
 #if CONFIG_PICO_FIDO2_BLE
     fido_ble_init();

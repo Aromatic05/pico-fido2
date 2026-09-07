@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import dev_open_maintenance
-from dev_ota import upload_firmware, wait_for_portal
+from dev_ota import get_portal_config, upload_firmware, wait_for_portal
 from fido2 import cbor
 
 
@@ -52,13 +52,17 @@ def test_usb_request() -> None:
 
 class Handler(BaseHTTPRequestHandler):
     received = b""
+    csrf = "0123456789abcdef0123456789abcdef"
 
     def log_message(self, *_args) -> None:
         pass
 
     def do_GET(self) -> None:
-        assert self.path == "/api/status"
-        body = json.dumps({"ota": {"enabled": True, "ready": True}}).encode()
+        if self.path == "/api/status":
+            body = json.dumps({"ota": {"enabled": True, "ready": True}}).encode()
+        else:
+            assert self.path == "/api/config"
+            body = json.dumps({"csrf": self.csrf}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -66,6 +70,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         assert self.path == "/api/update"
+        assert self.headers["X-Pico-CSRF"] == self.csrf
         Handler.received = self.rfile.read(int(self.headers["Content-Length"]))
         self.send_response(202)
         self.send_header("X-Pico-Partition", "ota_1")
@@ -86,6 +91,7 @@ def test_http_client() -> None:
             image = Path(tmp) / "app.bin"
             image.write_bytes(b"firmware-test" * 1000)
             assert wait_for_portal(base, 2)["ota"]["ready"] is True
+            assert get_portal_config(base)["csrf"] == Handler.csrf
             result = upload_firmware(base, image, timeout=2)
             assert result["ok"] is True
             assert result["partition"] == "ota_1"

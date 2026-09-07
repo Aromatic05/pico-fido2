@@ -23,6 +23,17 @@ DEFAULT_PORTAL = "http://192.168.4.1"
 DEFAULT_UPLOAD_TIMEOUT = 120.0
 
 
+def get_portal_config(base_url: str, timeout: float = 2.0) -> dict:
+    config_url = base_url.rstrip("/") + "/api/config"
+    try:
+        with urllib.request.urlopen(config_url, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"maintenance config returned HTTP {response.status}")
+            return json.loads(response.read())
+    except (OSError, RuntimeError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        raise SystemExit(f"failed to read maintenance config: {exc}") from exc
+
+
 def wait_for_portal(base_url: str, timeout: float) -> dict:
     deadline = time.monotonic() + timeout
     status_url = base_url.rstrip("/") + "/api/status"
@@ -59,6 +70,11 @@ def upload_firmware(
     connection.putrequest("POST", path)
     connection.putheader("Content-Type", "application/octet-stream")
     connection.putheader("Content-Length", str(size))
+    config = get_portal_config(base_url)
+    csrf = config.get("csrf")
+    if not isinstance(csrf, str) or len(csrf) != 32:
+        raise SystemExit("maintenance config did not provide a valid CSRF token")
+    connection.putheader("X-Pico-CSRF", csrf)
     connection.endheaders()
     with firmware.open("rb") as source:
         while chunk := source.read(16 * 1024):
@@ -97,6 +113,11 @@ def main() -> None:
     parser.add_argument("--portal", default=DEFAULT_PORTAL, help="maintenance portal base URL")
     parser.add_argument("--wait", type=float, default=60.0, help="seconds to wait for the portal")
     parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="do not request maintenance over USB; use an already-open physical maintenance session",
+    )
+    parser.add_argument(
         "--upload-timeout",
         type=float,
         default=DEFAULT_UPLOAD_TIMEOUT,
@@ -107,9 +128,12 @@ def main() -> None:
     if not args.firmware.is_file():
         raise SystemExit(f"firmware image not found: {args.firmware}")
 
-    serial = request_maintenance(args.serial)
-    identity = f" serial={serial}" if serial else ""
-    print(f"maintenance requested over USB{identity}")
+    if not args.no_open:
+        serial = request_maintenance(args.serial)
+        identity = f" serial={serial}" if serial else ""
+        print(f"maintenance requested over USB{identity}")
+    else:
+        print("using an already-open maintenance session")
     print("waiting for maintenance portal; this tool will not change host Wi-Fi state")
     status = wait_for_portal(args.portal, args.wait)
     ota = status.get("ota") or {}
