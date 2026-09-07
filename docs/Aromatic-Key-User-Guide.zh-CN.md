@@ -132,7 +132,13 @@ PicoFIDO2-XXXX
 
 其中 `XXXX` 是设备标识的一部分。
 
-5. 使用设备交付方提供的固定 WPA2 维护密码连接。该密码不能从管理面板修改，也不存放在本源码仓库中。
+5. 使用 Aromatic Key 的固定 WPA2 维护密码连接：
+
+```text
+PicoFIDO2-39eca8a6e423
+```
+
+该密码是当前 Aromatic Key v1.0.0 production profile 的共享维护密码，所有使用同一 production 配置构建的设备相同。它不是设备私钥，也不是用于保护 FIDO / PIV / OpenPGP / OATH 凭据的密钥。共享密码只负责维护 SoftAP 的无线链路访问控制；设备仍必须先在本机连续短按 BOOT 5 次，才会实际开放 Maintenance 会话。
 6. 打开浏览器访问：
 
 ```text
@@ -140,6 +146,60 @@ http://192.168.4.1
 ```
 
 管理模式只允许一个 Wi-Fi 客户端连接，并要求 WPA2 / PMF。设备进入管理模式后会暂停正常 BLE 工作。
+
+### 修改生产 Wi-Fi 密码
+
+当前仓库的 production 构建通过一个外部文本文件注入维护密码。当前本机使用的文件是：
+
+```text
+var/production-wifi-password.txt
+```
+
+文件当前内容为：
+
+```text
+PicoFIDO2-39eca8a6e423
+```
+
+要修改以后构建出的 Aromatic Key 的维护密码，直接修改该文件，例如：
+
+```bash
+printf '%s\n' 'New-Aromatic-Key-Password' > var/production-wifi-password.txt
+chmod 600 var/production-wifi-password.txt
+```
+
+production 构建脚本通过环境变量 `PICO_FIDO2_WIFI_PASSWORD_FILE` 指向这个文件：
+
+```bash
+export PICO_FIDO2_WIFI_PASSWORD_FILE=var/production-wifi-password.txt
+```
+
+实际读取和注入逻辑位于：
+
+```text
+tools/esp32s3_maintenance_profile.sh
+```
+
+production profile 会把文件内容写入构建期配置项：
+
+```text
+CONFIG_PICO_FIDO2_WIFI_PASSWORD
+```
+
+`src/fido2/Kconfig` 中的默认值 `pico-fido2` 不是 Aromatic Key 当前 production 密码；production 构建会用上述文件中的值覆盖它。
+
+例如重新构建 production A/B OTA 固件：
+
+```bash
+source ../esp-idf-v5.5/export.sh
+PICO_FIDO2_WIFI_PASSWORD_FILE=var/production-wifi-password.txt \
+  ./tools/build_esp32s3_ab_ota_update_bundle.sh \
+  baseline/physical-2884856dbe88-secure/provisioning \
+  build-ab-ota-production \
+  7.4.104 0 production
+```
+
+修改密码只影响**之后重新构建的固件**。已经烧录在设备中的密码不会因为修改本机文本文件而变化；必须重新构建签名 production 固件并通过 OTA 安装到设备，新的密码才会生效。
 
 ### 自动退出
 
@@ -329,7 +389,7 @@ Maintenance 卡片包含会话级操作。
 - 维护完成后主动 Restart device；
 - 不向设备安装来源不明的固件；
 - 妥善保管 FIDO PIN、PIV PIN / PUK、OpenPGP PIN 和 Configuration lock；
-- 不把 Aromatic Key 的 Maintenance Wi-Fi 密码公开写入源码或公共文档；
+- Maintenance Wi-Fi 密码是共享产品连接信息；如需更换，按“修改生产 Wi-Fi 密码”一节重新构建并 OTA 更新设备；
 - 修改 USB applications 前确认至少保留自己需要的管理与认证通路。
 
 ## 12. 当前生产交互摘要
