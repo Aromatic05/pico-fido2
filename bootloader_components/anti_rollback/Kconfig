@@ -1,0 +1,21 @@
+menu "Pico FIDO2 security"
+
+config PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK
+    bool "Single-slot ESP32-S3 anti-rollback"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Keep the existing factory-only partition layout while rejecting signed
+        application images whose security version is below the ESP32-S3 eFuse
+        SECURE_VERSION floor. The floor is advanced only by host provisioning.
+
+config PICO_FIDO2_SECURITY_VERSION
+    int "Application security version"
+    range 0 16
+    default 0
+    depends on PICO_FIDO2_SINGLE_SLOT_ANTI_ROLLBACK
+    help
+        Security epoch embedded in esp_app_desc. Increment this only when an
+        older signed firmware must be permanently revoked.
+
+endmenu

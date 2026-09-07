@@ -1,0 +1,5 @@
+# Known physical ESP32-S3 Super Mini flash profile.
+# The XMC 4 MiB device on the HIL board is reliable in DIO. Keep this explicit:
+# runtime secure-image verification must not silently upgrade the flash to QIO.
+# CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT is not set
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y

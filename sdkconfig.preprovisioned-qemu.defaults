@@ -1,0 +1,2 @@
+# Verify the host-provisioned KEY3/KEY4 contract without hardware.
+CONFIG_PICOKEYS_ESP32_REQUIRE_PROVISIONED_KEYS=y
