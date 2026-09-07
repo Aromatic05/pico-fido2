@@ -349,12 +349,13 @@ The final enable-bit ordering has a separate **virtual-only** transaction rehear
 
 The recovery-first secure profile deliberately leaves ESP-IDF `NVS_ENCRYPTION` disabled for now. The current 4 MiB A/B partition table has no `nvs_keys` partition; enabling the flash-encryption-backed NVS security provider without that partition makes ESP-IDF abort during secondary startup before `app_main`. Flash Encryption, Secure Boot, encrypted `otadata`/`part0`, and A/B rollback remain enabled. Adding a deliberate `nvs_keys` layout is a later hardening step, not part of the first recoverable hardware baseline.
 
-The virtual failure-state gate covers full provisioning, idempotency, safe readable-key partial recovery, unreadable KEY1 partial refusal, wrong readable key material, nonzero `SECURE_VERSION`, and the absence of any hardware port option:
+The virtual failure-state gate covers full provisioning, idempotency, safe readable-key partial recovery, unreadable KEY1 partial refusal, wrong readable key material, nonzero `SECURE_VERSION`, and proves that `provision-virtual` itself cannot address a hardware port. A separate QEMU-ROM gate exercises the exact guarded physical command path without accepting any physical serial-port argument:
 
 ```bash
 . "$IDF_PATH/export.sh"
 ./tools/test_esp32s3_virtual_provisioning.sh
 ./tools/test_esp32s3_virtual_security_activation.sh
+./tools/test_esp32s3_physical_provisioning_qemu.sh
 ```
 
 Before any hardware key provisioning, create the target manifest from the factory MAC, then run the read-only blank-device preflight against that binding. It requires Secure Boot and Flash Encryption to still be disabled, `SECURE_VERSION=0`, both ROM recovery paths to remain available, and KEY0/KEY1/KEY3/KEY4 to still be empty/readable/writeable with blank purposes:
@@ -366,6 +367,28 @@ Before any hardware key provisioning, create the target manifest from the factor
     --target-manifest build-provisioning/target-123456789abc.json
 ```
 
+The real-device key command is also dry-run by default. It requires the MAC-bound target manifest and reports the exact pending blocks plus the recovery-first burn order without writing anything:
+
+```bash
+./tools/esp32s3_provision.py provision-device \
+    --port /dev/ttyACM0 \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-123456789abc.json
+```
+
+Only an explicit `--apply` makes this command irreversible, and real apply additionally requires retyping the exact factory MAC with `--expect-mac`. The command burns readable KEY0, KEY3, and KEY4 first, re-reads and verifies each block after its individual burn, and permits the unreadable Flash Encryption KEY1 burn only when KEY1 is the sole remaining block and KEY0/KEY3/KEY4 still match the manifest exactly:
+
+```bash
+./tools/esp32s3_provision.py provision-device \
+    --port /dev/ttyACM0 \
+    --manifest build-provisioning/manifest.json \
+    --target-manifest build-provisioning/target-123456789abc.json \
+    --expect-mac 12:34:56:78:9a:bc \
+    --apply
+```
+
+`provision-device` never writes `SECURE_VERSION`, `SPI_BOOT_CRYPT_CNT`, `SECURE_BOOT_EN`, or any recovery-disable bit. Flash Encryption and Secure Boot activation remain later, separately gated steps after the encrypted baseline has been programmed and verified.
+
 After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabling Flash Encryption or Secure Boot, the separate read-only verification checks the key purposes, key-block write protection, KEY1 read protection, and exact readable KEY0/KEY3/KEY4 material against the host manifest:
 
 ```bash
@@ -375,7 +398,7 @@ After KEY0/KEY1/KEY3/KEY4 have eventually been provisioned, but **before** enabl
     --target-manifest build-provisioning/target-123456789abc.json
 ```
 
-`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. `--expect-mac` remains available as a manual compatibility guard, but a target manifest is preferred because it also binds the MAC to the exact provisioning-manifest hash. `provision-virtual --apply` writes only the specified virtual backing file; the tool still does **not** provide a real-device KEY0/KEY1/KEY3/KEY4 provisioning command. Initial provisioning requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
+`preflight`, `verify-device`, and `verify-secure` are all read-only and have no apply/write option. `provision-virtual --apply` writes only the specified virtual backing file. `provision-device` is the only initial real KEY0/KEY1/KEY3/KEY4 write path and remains dry-run unless `--apply` plus the extra MAC guard are both supplied. Initial provisioning requires `SECURE_VERSION=0`; anti-rollback advancement is a later, independent operation and is not part of this flow.
 
 After the encrypted image has been programmed and the development Flash Encryption state plus Secure Boot have both been enabled, use the final read-only verifier before treating the device as a secured candidate:
 

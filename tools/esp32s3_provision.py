@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Generate and validate ESP32-S3 Pico FIDO2 provisioning material.
+"""Generate, validate, and guardedly provision ESP32-S3 Pico FIDO2 material.
 
-KEY0/KEY1/KEY3/KEY4 provisioning has a virtual-eFuse rehearsal path only. It
-cannot address a serial port or write physical hardware. The separate explicit
-``security-version --apply`` command is the only real-device write path in this
-tool and is intentionally independent from initial key provisioning.
+Initial KEY0/KEY1/KEY3/KEY4 provisioning is dry-run by default. Real hardware
+requires an exact target manifest and an additional MAC guard before ``--apply``.
+Security activation and anti-rollback remain separate operations.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from pathlib import Path
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 MAX_SECURITY_VERSION = 16
 PROVISION_KEY_BLOCKS = (0, 1, 3, 4)
+REAL_PROVISION_ORDER = (0, 3, 4, 1)
 PROVISION_FIELDS = (
     "SECURE_BOOT_EN",
     "SPI_BOOT_CRYPT_CNT",
@@ -438,7 +438,7 @@ def key_block_matches_expected(
     )
 
 
-def virtual_provisioning_pending_blocks(
+def provisioning_pending_blocks(
     state: ProvisioningDeviceState,
     expected: dict[int, tuple[str, bool, bytes | None]],
 ) -> list[int]:
@@ -475,7 +475,7 @@ def virtual_provision_command(args: argparse.Namespace) -> None:
     state = read_provisioning_state(virt_file=args.virt_file)
     if expected_mac is not None and expected_mac != state.mac:
         raise SystemExit(f"expected MAC {expected_mac}, device reports {state.mac}")
-    pending = virtual_provisioning_pending_blocks(state, expected)
+    pending = provisioning_pending_blocks(state, expected)
 
     print("ESP32-S3 virtual key provisioning rehearsal")
     print(f"source:              {args.virt_file}")
@@ -511,6 +511,100 @@ def virtual_provision_command(args: argparse.Namespace) -> None:
     print("KEY0/1/3/4 layout:   PASS")
     print("KEY1 read protect:   PASS")
     print("virtual write:       applied")
+
+
+def device_provision_command(args: argparse.Namespace) -> None:
+    verify_manifest(args.manifest, quiet=True)
+    expected_mac = expected_mac_guard(args, args.manifest)
+    if expected_mac is None:
+        raise SystemExit("provision-device requires --target-manifest")
+    if args.apply and args.expect_mac is None:
+        raise SystemExit("provision-device --apply requires an explicit --expect-mac guard")
+
+    expected = expected_provisioning_material(args.manifest)
+    state = read_provisioning_state(port=args.port)
+    if state.mac != expected_mac:
+        raise SystemExit(f"expected MAC {expected_mac}, device reports {state.mac}")
+    pending = provisioning_pending_blocks(state, expected)
+    ordered_pending = [index for index in REAL_PROVISION_ORDER if index in pending]
+
+    print("ESP32-S3 guarded physical key provisioning")
+    print(f"source:              {args.port}")
+    print(f"manifest:            {args.manifest}")
+    print(f"target manifest:     {args.target_manifest}")
+    print(f"device MAC:          {state.mac}")
+    print("SECURE_VERSION:      0")
+    print("Secure Boot:         disabled")
+    print("Flash Encryption:    disabled")
+    print("ROM recovery:        enabled")
+    print("USB ROM recovery:    enabled")
+    print(
+        "pending blocks:      "
+        + (", ".join(f"KEY{index}" for index in pending) if pending else "none")
+    )
+    print(
+        "guarded burn order:  "
+        + (" -> ".join(f"KEY{index}" for index in ordered_pending) if ordered_pending else "none")
+    )
+
+    if not pending:
+        validate_provisioned_device_state(state, expected)
+        print("device write:        no (already provisioned)")
+        return
+    if not args.apply:
+        print("device write:        no (dry-run)")
+        return
+
+    root = args.manifest.parent
+    initial_mac = state.mac
+    for index in ordered_pending:
+        before = read_provisioning_state(port=args.port)
+        if before.mac != initial_mac:
+            raise SystemExit("device MAC changed during physical provisioning")
+        remaining = provisioning_pending_blocks(before, expected)
+        if index not in remaining:
+            continue
+        if index == 1:
+            if remaining != [1]:
+                raise SystemExit(
+                    "KEY1 must be the final pending block; refusing to make it unreadable early"
+                )
+            for readable_index in (0, 3, 4):
+                if not key_block_matches_expected(
+                    before.keys[readable_index], expected[readable_index]
+                ):
+                    raise SystemExit(
+                        f"KEY{readable_index} must verify exactly before the final KEY1 burn"
+                    )
+
+        filename, purpose = PROVISION_BURN[index]
+        command = espefuse_base(port=args.port) + [
+            "--do-not-confirm",
+            "burn_key",
+            f"BLOCK_KEY{index}",
+            str(root / filename),
+            purpose,
+        ]
+        run(command, quiet=True)
+
+        after = read_provisioning_state(port=args.port)
+        if after.mac != initial_mac:
+            raise SystemExit("device MAC changed after physical key burn")
+        validate_pre_enable_state(after)
+        if not key_block_matches_expected(after.keys[index], expected[index]):
+            raise SystemExit(f"KEY{index} readback/protection verification failed")
+        provisioning_pending_blocks(after, expected)
+        print(f"KEY{index} burn/readback: PASS")
+
+    final = read_provisioning_state(port=args.port)
+    if final.mac != initial_mac:
+        raise SystemExit("device MAC changed after physical provisioning")
+    validate_provisioned_device_state(final, expected)
+    print("KEY0/1/3/4 layout:   PASS")
+    print("KEY1 read protect:   PASS")
+    print("SECURE_VERSION:      PASS (still 0)")
+    print("recovery paths:      PASS (still enabled)")
+    print("device write:        applied")
 
 
 def validate_provisioned_device_state(
@@ -916,8 +1010,8 @@ def print_plan() -> None:
     print("7. Enable SECURE_BOOT_EN last, after image/key verification.")
     print("8. Production hardening, if wanted later, is a separate irreversible policy step.")
     print()
-    print("KEY0/1/3/4 writes are available only against an espefuse --virt backing file.")
-    print("There is no physical-device KEY0/KEY1/KEY3/KEY4 burn command.")
+    print("Physical KEY0/KEY3/KEY4/KEY1 provisioning is dry-run by default and MAC-bound.")
+    print("Physical --apply requires an explicit --expect-mac guard and burns unreadable KEY1 last.")
     print("Flash Encryption/Secure Boot enable-bit writes can likewise be rehearsed only with activate-secure-virtual.")
     print("There is no physical-device security activation command in this tool.")
     print("Only 'security-version --apply' can burn SECURE_VERSION; real hardware also requires current-floor and MAC guards.")
@@ -983,6 +1077,26 @@ def main() -> None:
     provision_virtual.add_argument("--manifest", type=Path, default=Path("build-provisioning/manifest.json"))
     provision_virtual.add_argument("--target-manifest", type=Path, help="device binding checked before any virtual burn")
     provision_virtual.add_argument("--apply", action="store_true", help="write the virtual eFuse backing file")
+    provision_device = sub.add_parser(
+        "provision-device",
+        help="guarded KEY0/KEY3/KEY4/KEY1 provisioning on one MAC-bound physical device",
+    )
+    provision_device.add_argument("--port", required=True, help="ESP32-S3 ROM serial port")
+    provision_device.add_argument(
+        "--manifest", type=Path, default=Path("build-provisioning/manifest.json")
+    )
+    provision_device.add_argument(
+        "--target-manifest", type=Path, required=True,
+        help="required exact factory-MAC + provisioning-manifest binding",
+    )
+    provision_device.add_argument(
+        "--expect-mac", type=mac_argument,
+        help="additional explicit MAC guard; required with --apply",
+    )
+    provision_device.add_argument(
+        "--apply", action="store_true",
+        help="irreversibly burn KEY0/KEY3/KEY4 then KEY1 after per-key readback",
+    )
     activate_virtual = sub.add_parser(
         "activate-secure-virtual",
         help="rehearse Flash Encryption then Secure Boot activation on a virtual eFuse only",
@@ -1028,6 +1142,8 @@ def main() -> None:
         secure_state_command(args)
     elif args.command == "provision-virtual":
         virtual_provision_command(args)
+    elif args.command == "provision-device":
+        device_provision_command(args)
     elif args.command == "activate-secure-virtual":
         activate_secure_virtual_command(args)
     else:

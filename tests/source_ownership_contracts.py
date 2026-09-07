@@ -36,6 +36,7 @@ SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
 UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_update_bundle.sh"
 AB_SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_security_bundle.sh"
 AB_UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_ota_update_bundle.sh"
+PROVISION_TOOL = ROOT / "tools" / "esp32s3_provision.py"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
 CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
@@ -1040,6 +1041,31 @@ def verify_secure_builder_key_binding() -> None:
                 f"{label} must verify the effective signing-key path against the selected provisioning directory")
 
 
+def verify_guarded_physical_provisioning() -> None:
+    source = text(PROVISION_TOOL)
+    start = source.index("def device_provision_command(")
+    end = source.index("\ndef validate_provisioned_device_state(", start)
+    body = source[start:end]
+    require("REAL_PROVISION_ORDER = (0, 3, 4, 1)" in source,
+            "physical provisioning must keep readable KEY0/KEY3/KEY4 ahead of unreadable KEY1")
+    require("args.apply and args.expect_mac is None" in body,
+            "physical --apply must require an additional explicit MAC guard")
+    require("remaining != [1]" in body and "KEY1 must be the final pending block" in body,
+            "physical provisioning must refuse to burn KEY1 while any readable key remains pending")
+    require("for readable_index in (0, 3, 4)" in body and
+            "key_block_matches_expected" in body,
+            "KEY0/KEY3/KEY4 must verify exactly before the final KEY1 burn")
+    before(body, "run(command, quiet=True)", "after = read_provisioning_state(port=args.port)",
+           "every physical key burn must be followed by an eFuse readback")
+    require("validate_pre_enable_state(after)" in body,
+            "physical key provisioning must re-check recovery/security state after each burn")
+    require("burn_efuse" not in body and "SECURE_BOOT_EN" not in body and
+            "SPI_BOOT_CRYPT_CNT" not in body,
+            "initial physical key provisioning must not activate security features or anti-rollback")
+    require('"--target-manifest", type=Path, required=True' in source,
+            "physical provisioning CLI must require a MAC-bound target manifest")
+
+
 def main() -> None:
     checks = (
         ("product SDK binding", verify_product_sdk_binding),
@@ -1061,6 +1087,7 @@ def main() -> None:
         ("allocation boundaries", verify_allocation_boundaries),
         ("protocol buffer bounds", verify_protocol_buffer_bounds),
         ("secure builder key binding", verify_secure_builder_key_binding),
+        ("guarded physical provisioning", verify_guarded_physical_provisioning),
     )
     for label, check in checks:
         check()
