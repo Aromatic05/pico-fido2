@@ -27,6 +27,7 @@ WIRELESS_LAYOUT_DEFAULTS = ROOT / "sdkconfig.wireless-layout.defaults"
 SECURE_OTA_DEFAULTS = ROOT / "sdkconfig.secure-ota.defaults"
 SECURITY_PREPROVISIONED_DEFAULTS = ROOT / "sdkconfig.security-preprovisioned.defaults"
 DEVELOPMENT_MAINTENANCE_DEFAULTS = ROOT / "sdkconfig.development-maintenance.defaults"
+PHYSICAL_ESP32S3_DEFAULTS = ROOT / "sdkconfig.esp32s3-physical.defaults"
 TRANSPORT_KCONFIG = ROOT / "src" / "fido2" / "Kconfig"
 FIDO2_CMAKE = ROOT / "src" / "fido2" / "CMakeLists.txt"
 ESP32_TRANSPORTS = ROOT / "src" / "fido2" / "esp32_transports.c"
@@ -417,6 +418,8 @@ def verify_ab_ota() -> None:
             "esp_flash_encryption_enabled()" in status and
             "status->secure_boot && status->flash_encryption" in status,
             "production A/B updates must fail closed unless Secure Boot and Flash Encryption are active")
+    require("config.stack_size = 8192" in portal,
+            "maintenance HTTP task must match ESP-IDF OTA examples' 8 KiB stack for secure image verification")
     require("CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA" in status and
             "security_ready = true" in status,
             "pre-security OTA bypass must remain an explicit compile-time development path")
@@ -1041,6 +1044,24 @@ def verify_secure_builder_key_binding() -> None:
                 f"{label} must verify the effective signing-key path against the selected provisioning directory")
 
 
+def verify_physical_flash_mode() -> None:
+    defaults = text(PHYSICAL_ESP32S3_DEFAULTS)
+    require("CONFIG_ESPTOOLPY_FLASHMODE_DIO=y" in defaults,
+            "physical ESP32-S3 profile must force DIO")
+    require("# CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT is not set" in defaults,
+            "physical ESP32-S3 profile must disable flash auto-detection")
+    for path in (SECURITY_BUNDLE, UPDATE_BUNDLE, AB_SECURITY_BUNDLE, AB_UPDATE_BUNDLE):
+        source = text(path)
+        label = path.name
+        require("sdkconfig.esp32s3-physical.defaults" in source,
+                f"{label} must layer the physical DIO profile")
+        require("CONFIG_ESPTOOLPY_FLASHMODE_DIO=y" in source,
+                f"{label} must verify effective DIO mode")
+        require("CONFIG_ESPTOOLPY_FLASHMODE_QIO=y" in source and
+                "CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT=y" in source,
+                f"{label} must reject QIO/auto-detect regressions")
+
+
 def verify_guarded_physical_provisioning() -> None:
     source = text(PROVISION_TOOL)
     start = source.index("def device_provision_command(")
@@ -1087,6 +1108,7 @@ def main() -> None:
         ("allocation boundaries", verify_allocation_boundaries),
         ("protocol buffer bounds", verify_protocol_buffer_bounds),
         ("secure builder key binding", verify_secure_builder_key_binding),
+        ("physical flash mode", verify_physical_flash_mode),
         ("guarded physical provisioning", verify_guarded_physical_provisioning),
     )
     for label, check in checks:

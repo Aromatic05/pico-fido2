@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from dev_open_maintenance import request_maintenance
 
 DEFAULT_PORTAL = "http://192.168.4.1"
+DEFAULT_UPLOAD_TIMEOUT = 120.0
 
 
 def wait_for_portal(base_url: str, timeout: float) -> dict:
@@ -41,12 +42,16 @@ def wait_for_portal(base_url: str, timeout: float) -> dict:
     )
 
 
-def upload_firmware(base_url: str, firmware: Path) -> dict:
+def upload_firmware(
+    base_url: str,
+    firmware: Path,
+    timeout: float = DEFAULT_UPLOAD_TIMEOUT,
+) -> dict:
     parsed = urlparse(base_url)
     if parsed.scheme != "http" or not parsed.hostname:
         raise SystemExit("development OTA URL must be an http:// URL")
     path = (parsed.path.rstrip("/") if parsed.path else "") + "/api/update"
-    connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
     size = firmware.stat().st_size
     if size <= 0:
         raise SystemExit("firmware image is empty")
@@ -91,6 +96,12 @@ def main() -> None:
     parser.add_argument("--serial", help="select one 1050:0407 development device by USB serial")
     parser.add_argument("--portal", default=DEFAULT_PORTAL, help="maintenance portal base URL")
     parser.add_argument("--wait", type=float, default=60.0, help="seconds to wait for the portal")
+    parser.add_argument(
+        "--upload-timeout",
+        type=float,
+        default=DEFAULT_UPLOAD_TIMEOUT,
+        help="seconds to wait for the OTA upload/verification response",
+    )
     args = parser.parse_args()
 
     if not args.firmware.is_file():
@@ -107,7 +118,7 @@ def main() -> None:
     if not ota.get("ready"):
         raise SystemExit(f"A/B OTA is not ready: {ota}")
 
-    result = upload_firmware(args.portal, args.firmware)
+    result = upload_firmware(args.portal, args.firmware, args.upload_timeout)
     print(
         "OTA accepted: "
         f"partition={result.get('partition')} version={result.get('version')} "

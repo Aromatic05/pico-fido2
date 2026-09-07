@@ -5,7 +5,7 @@ mode="${1:-build}"
 port="${2:-}"
 build_dir="${BUILD_DIR:-build-bringup-wireless}"
 sdkconfig="${SDKCONFIG:-sdkconfig.bringup-wireless}"
-defaults='sdkconfig.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.wireless-layout.defaults'
+defaults='sdkconfig.defaults;sdkconfig.esp32s3-physical.defaults;sdkconfig.bringup.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.wireless-layout.defaults'
 
 case "$mode" in
     build|flash) ;;
@@ -42,6 +42,7 @@ require_config 'CONFIG_PICO_FIDO2_BLE=y' 'FIDO BLE transport'
 require_config 'CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y' 'Wi-Fi commissioning'
 require_config 'CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y' 'development maintenance profile'
 require_config 'CONFIG_APP_REPRODUCIBLE_BUILD=y' 'reproducible application build'
+require_config 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' 'explicit DIO flash mode'
 require_config 'CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6' 'bounded Wi-Fi static RX buffers'
 require_config 'CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic RX buffers'
 require_config 'CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12' 'bounded Wi-Fi dynamic TX buffers'
@@ -52,6 +53,8 @@ require_config 'CONFIG_BT_NIMBLE_NVS_PERSIST=y' 'persistent BLE bonds'
 require_config 'CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC=60' 'bounded fresh BLE pairing window'
 require_config 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=300' 'bounded Wi-Fi maintenance timeout'
 reject_config 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' 'automatic light sleep'
+reject_config 'CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT=y' 'flash mode auto-detection'
+reject_config 'CONFIG_ESPTOOLPY_FLASHMODE_QIO=y' 'QIO runtime flash mode'
 reject_config 'CONFIG_SECURE_BOOT=y' 'Secure Boot'
 reject_config 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' 'Flash Encryption'
 

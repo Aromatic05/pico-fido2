@@ -86,7 +86,7 @@ def test_http_client() -> None:
             image = Path(tmp) / "app.bin"
             image.write_bytes(b"firmware-test" * 1000)
             assert wait_for_portal(base, 2)["ota"]["ready"] is True
-            result = upload_firmware(base, image)
+            result = upload_firmware(base, image, timeout=2)
             assert result["ok"] is True
             assert result["partition"] == "ota_1"
             assert result["version"] == "test"

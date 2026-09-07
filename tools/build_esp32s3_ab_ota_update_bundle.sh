@@ -7,7 +7,7 @@ project_ver="${3:-7.4.1}"
 security_version="${4:-0}"
 build_dir=build-security-ab-ota-update
 sdkconfig=sdkconfig.security-ab-ota-update
-defaults='sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
+defaults='sdkconfig.defaults;sdkconfig.esp32s3-physical.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.development-maintenance.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
 slot_capacity=$((0x170000))
 
 fail() {
@@ -46,6 +46,7 @@ for expected in \
     CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y \
     CONFIG_PICO_FIDO2_AB_OTA=y \
     CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y \
+    CONFIG_ESPTOOLPY_FLASHMODE_DIO=y \
     CONFIG_PM_ENABLE=y \
     CONFIG_BT_CTRL_MODEM_SLEEP=y \
     CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N0=y \
@@ -68,6 +69,10 @@ if grep -qx 'CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y' "$sdkconfig"; then
 fi
 if grep -qx 'CONFIG_PICOKEYS_ESP32_DEV_KEYS=y' "$sdkconfig"; then
     fail 'A/B OTA update build unexpectedly uses development root keys'
+fi
+if grep -qx 'CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT=y' "$sdkconfig" || \
+   grep -qx 'CONFIG_ESPTOOLPY_FLASHMODE_QIO=y' "$sdkconfig"; then
+    fail 'A/B OTA update build unexpectedly uses auto/QIO flash mode on physical hardware'
 fi
 if grep -qx 'CONFIG_NVS_ENCRYPTION=y' "$sdkconfig"; then
     fail 'A/B OTA update build enables NVS Encryption without an nvs_keys partition'
