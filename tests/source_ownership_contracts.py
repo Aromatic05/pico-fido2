@@ -34,6 +34,8 @@ SECURE_OTA_PARTITIONS = ROOT / "pico-keys-sdk" / "config" / "esp32" / "partition
 BLE_DEFAULTS = ROOT / "sdkconfig.ble.defaults"
 SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_security_bundle.sh"
 UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_update_bundle.sh"
+AB_SECURITY_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_security_bundle.sh"
+AB_UPDATE_BUNDLE = ROOT / "tools" / "build_esp32s3_ab_ota_update_bundle.sh"
 OTP = ROOT / "pico-fido" / "src" / "fido" / "otp.c"
 CBOR_CONFIG = ROOT / "pico-fido" / "src" / "fido" / "cbor_config.c"
 CREDENTIAL = ROOT / "pico-fido" / "src" / "fido" / "credential.c"
@@ -1023,6 +1025,21 @@ def verify_protocol_buffer_bounds() -> None:
             "U2F Authenticate must require the actual APDU payload to exactly match keyHandleLen")
 
 
+def verify_secure_builder_key_binding() -> None:
+    for path in (SECURITY_BUNDLE, UPDATE_BUNDLE, AB_SECURITY_BUNDLE, AB_UPDATE_BUNDLE):
+        source = text(path)
+        label = path.name
+        require('[[ "$provision_dir" == "build-provisioning" ]]' not in source,
+                f"{label} must not reject MAC-bound per-device provisioning directories")
+        require('provision_dir="$(realpath "$provision_dir")"' in source,
+                f"{label} must canonicalize the selected provisioning directory")
+        require('.signing-key.defaults' in source and
+                'CONFIG_SECURE_BOOT_SIGNING_KEY=' in source,
+                f"{label} must override the Secure Boot key from the selected provisioning directory")
+        require('"$provision_dir/secure_boot_signing_key.pem"' in source,
+                f"{label} must verify the effective signing-key path against the selected provisioning directory")
+
+
 def main() -> None:
     checks = (
         ("product SDK binding", verify_product_sdk_binding),
@@ -1043,6 +1060,7 @@ def main() -> None:
         ("Credential ownership", verify_credential_ownership),
         ("allocation boundaries", verify_allocation_boundaries),
         ("protocol buffer bounds", verify_protocol_buffer_bounds),
+        ("secure builder key binding", verify_secure_builder_key_binding),
     )
     for label, check in checks:
         check()

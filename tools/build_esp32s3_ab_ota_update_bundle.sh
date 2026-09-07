@@ -17,9 +17,8 @@ fail() {
 
 [[ -n "${IDF_PATH:-}" ]] || fail 'IDF_PATH is not set; activate ESP-IDF 5.5 first'
 command -v idf.py >/dev/null || fail 'idf.py not found'
-[[ "$provision_dir" == "build-provisioning" ]] \
-    || fail 'current secure build profile expects provisioning material in build-provisioning'
 [[ -f "$provision_dir/manifest.json" ]] || fail "missing $provision_dir/manifest.json"
+provision_dir="$(realpath "$provision_dir")"
 [[ -n "$project_ver" && ${#project_ver} -le 31 ]] || fail 'project version must be 1..31 characters'
 [[ "$security_version" =~ ^[0-9]+$ ]] && (( security_version >= 0 && security_version <= 16 )) \
     || fail 'security version must be an integer from 0 to 16'
@@ -30,8 +29,10 @@ rm -rf "$build_dir" "$out_dir"
 rm -f "$sdkconfig" "$sdkconfig.old"
 mkdir -p "$out_dir"
 version_defaults="$out_dir/.security-version.defaults"
+signing_defaults="$out_dir/.signing-key.defaults"
 printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$security_version" >"$version_defaults"
-build_defaults="${defaults};${version_defaults}"
+printf 'CONFIG_SECURE_BOOT_SIGNING_KEY="%s/secure_boot_signing_key.pem"\n' "$provision_dir" >"$signing_defaults"
+build_defaults="${defaults};${signing_defaults};${version_defaults}"
 
 SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" \
     -DPROJECT_VER="$project_ver" set-target esp32s3 >/dev/null
@@ -75,7 +76,7 @@ if grep -qx 'CONFIG_PICO_FIDO2_QEMU=y' "$sdkconfig"; then
     fail 'A/B OTA update build unexpectedly uses QEMU platform mode'
 fi
 
-grep -qx 'CONFIG_SECURE_BOOT_SIGNING_KEY="build-provisioning/secure_boot_signing_key.pem"' "$sdkconfig" \
+grep -Fqx "CONFIG_SECURE_BOOT_SIGNING_KEY=\"$provision_dir/secure_boot_signing_key.pem\"" "$sdkconfig" \
     || fail 'unexpected Secure Boot signing key path'
 grep -qx 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="pico-keys-sdk/config/esp32/partitions-secure-ota.csv"' "$sdkconfig" \
     || fail 'secure A/B partition table is not selected'
@@ -87,7 +88,7 @@ artifact="$out_dir/pico_fido2-ota-signed.bin"
 (( $(stat -c %s "$app") <= slot_capacity )) || fail 'signed application does not fit one A/B OTA slot'
 python -m espsecure verify_signature --version 2 --keyfile "$signing_key" "$app" >/dev/null
 cp "$app" "$artifact"
-rm -f "$version_defaults"
+rm -f "$version_defaults" "$signing_defaults"
 
 python3 - "$out_dir/manifest.json" "$provision_dir/manifest.json" "$artifact" "$project_ver" "$security_version" "$slot_capacity" <<'PY'
 from pathlib import Path
