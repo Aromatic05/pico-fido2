@@ -49,12 +49,57 @@ static char softap_ssid[33];
 static char csrf_token[33];
 static bool commissioning_started;
 static bool restart_requested;
+static TickType_t restart_requested_tick;
 static bool development_maintenance_requested;
 static TickType_t last_activity_tick;
 static int (*previous_button_pressed_cb)(uint8_t);
 
+typedef struct {
+    bool valid;
+    bool pm_readback;
+    esp_pm_config_t pm;
+    unsigned secure_version;
+    bool secure_boot;
+    bool flash_encryption;
+    bool rom_download;
+    bool usb_download;
+#if CONFIG_PICO_FIDO2_AB_OTA
+    bool ota_valid;
+    fido_ota_status_t ota;
+#endif
+} maintenance_status_snapshot_t;
+
+static maintenance_status_snapshot_t status_snapshot;
+
+static void capture_status_snapshot(void) {
+    maintenance_status_snapshot_t next = {
+        .pm = {
+            .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+            .min_freq_mhz = 80,
+            .light_sleep_enable = false,
+        },
+    };
+    next.pm_readback = esp_pm_get_configuration(&next.pm) == ESP_OK;
+    next.secure_version = esp_efuse_read_secure_version();
+    next.secure_boot = esp_secure_boot_enabled();
+    next.flash_encryption = esp_flash_encryption_enabled();
+    next.rom_download = !esp_efuse_read_field_bit(ESP_EFUSE_DIS_DOWNLOAD_MODE);
+    next.usb_download = !esp_efuse_read_field_bit(
+        ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE);
+#if CONFIG_PICO_FIDO2_AB_OTA
+    next.ota_valid = fido_ota_get_status(&next.ota) == ESP_OK;
+#endif
+    next.valid = true;
+    status_snapshot = next;
+}
+
 static void touch_activity(void) {
     __atomic_store_n(&last_activity_tick, xTaskGetTickCount(), __ATOMIC_RELEASE);
+}
+
+static void schedule_restart(void) {
+    __atomic_store_n(&restart_requested_tick, xTaskGetTickCount(), __ATOMIC_RELAXED);
+    __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
 }
 
 static esp_err_t init_network_stack(void) {
@@ -147,7 +192,7 @@ static const char index_html[] =
     "async function changeLock(clear){const p=new URLSearchParams();if(clear){p.set('clear','1')}else{const n=newLockInput.value.trim(),c=confirmLockInput.value.trim();if(!/^[0-9a-fA-F]{32}$/.test(n)||/^0+$/.test(n)){msgBox.className='bad';msgBox.textContent='New lock must be 32 non-zero hexadecimal characters.';return}if(n.toLowerCase()!==c.toLowerCase()){msgBox.className='bad';msgBox.textContent='New lock confirmation does not match.';return}p.set('new',n)}const r=await fetch('/api/config/lock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Pico-CSRF':cfg.csrf},body:p});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Lock update failed';return}newLockInput.value='';confirmLockInput.value='';await load();msgBox.className='ok';msgBox.textContent=clear?'Configuration lock cleared.':'Configuration lock saved.'}"
     "async function pairBle(){const r=await fetch('/api/ble/pairing',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE pairing authorized for the next window; restarting.':(j.error||'Pairing authorization failed.')}"
     "async function resetBle(){if(!confirm('Revoke every persisted BLE bond? Existing paired phones/computers will lose trust. One new pairing window will open after restart.'))return;const r=await fetch('/api/ble/bonds/reset',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});const j=await r.json();msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'BLE bond reset scheduled; restarting into one fresh-pairing window.':(j.error||'BLE bond reset failed.')}"
-    "async function installUpdate(){const f=firmwareInput.files[0];if(!f){msgBox.className='bad';msgBox.textContent='Choose a signed application .bin first.';return}if(!confirm(`Install ${f.name} (${f.size} bytes) into the inactive slot?`))return;updateButton.disabled=true;msgBox.className='muted';msgBox.textContent='Uploading and verifying signed firmware...';try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Pico-CSRF':cfg.csrf},body:f});const j=await r.json();if(!r.ok){msgBox.className='bad';msgBox.textContent=j.error||'Update rejected';updateButton.disabled=false;return}msgBox.className='ok';msgBox.textContent=`Verified ${j.version}, epoch ${j.securityVersion}, in ${j.partition}; restarting.`}catch(e){msgBox.className='bad';msgBox.textContent=String(e);updateButton.disabled=false}}"
+    "async function installUpdate(){const f=firmwareInput.files[0];if(!f){msgBox.className='bad';msgBox.textContent='Choose a signed application .bin first.';return}if(!confirm(`Install ${f.name} (${f.size} bytes) into the inactive slot?`))return;updateButton.disabled=true;msgBox.className='muted';msgBox.textContent='Uploading and verifying signed firmware...';try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Pico-CSRF':cfg.csrf},body:f});if(!r.ok){const j=await r.json();msgBox.className='bad';msgBox.textContent=j.error||'Update rejected';updateButton.disabled=false;return}const v=r.headers.get('X-Pico-Version')||'new image',p=r.headers.get('X-Pico-Partition')||'inactive slot',e=r.headers.get('X-Pico-Security-Version')||'?';msgBox.className='ok';msgBox.textContent=`Verified ${v}, epoch ${e}, in ${p}; restarting.`}catch(e){msgBox.className='bad';msgBox.textContent=String(e);updateButton.disabled=false}}"
     "async function reboot(){const r=await fetch('/api/reboot',{method:'POST',headers:{'X-Pico-CSRF':cfg.csrf}});msgBox.className=r.ok?'ok':'bad';msgBox.textContent=r.ok?'Restart requested.':'Restart request failed.'}load().catch(e=>{msgBox.className='bad';msgBox.textContent=e})</script>"
     "</body></html>";
 
@@ -160,51 +205,31 @@ static esp_err_t index_get(httpd_req_t *req) {
 
 static esp_err_t status_get(httpd_req_t *req) {
     touch_activity();
+    if (!status_snapshot.valid) {
+        return json_response(req, "503 Service Unavailable",
+                             "{\"error\":\"status snapshot unavailable\"}");
+    }
     const esp_app_desc_t *app_desc = esp_app_get_description();
-    const esp_partition_t *running_partition = esp_ota_get_running_partition();
-    uint8_t image_sha[32] = {0};
-    bool image_sha_ok = running_partition != NULL &&
-                        esp_partition_get_sha256(running_partition, image_sha) == ESP_OK;
-    char image_sha_hex[65] = {0};
     char image_sha_json[67] = "null";
     char elf_sha_hex[65] = {0};
     for (size_t i = 0; i < 32; ++i) {
         snprintf(elf_sha_hex + i * 2, 3, "%02x", app_desc->app_elf_sha256[i]);
-        if (image_sha_ok) {
-            snprintf(image_sha_hex + i * 2, 3, "%02x", image_sha[i]);
-        }
     }
-    if (image_sha_ok) {
-        snprintf(image_sha_json, sizeof(image_sha_json), "\"%s\"", image_sha_hex);
-    }
-
-    esp_pm_config_t pm = {
-        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-        .min_freq_mhz = 80,
-        .light_sleep_enable = false,
-    };
-    bool pm_readback = esp_pm_get_configuration(&pm) == ESP_OK;
-    unsigned secure_version = esp_efuse_read_secure_version();
-    bool secure_boot = esp_secure_boot_enabled();
-    bool flash_encryption = esp_flash_encryption_enabled();
-    bool rom_download = !esp_efuse_read_field_bit(ESP_EFUSE_DIS_DOWNLOAD_MODE);
-    bool usb_download = !esp_efuse_read_field_bit(
-        ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE);
 
     char ota_json[320];
 #if CONFIG_PICO_FIDO2_AB_OTA
-    fido_ota_status_t ota_status;
-    if (fido_ota_get_status(&ota_status) == ESP_OK) {
+    if (status_snapshot.ota_valid) {
+        const fido_ota_status_t *ota_status = &status_snapshot.ota;
         snprintf(ota_json, sizeof(ota_json),
                  "{\"enabled\":true,\"ready\":%s,\"softwareRollback\":true,"
                  "\"confirmationPending\":%s,\"runningPartition\":\"%s\","
                  "\"nextPartition\":\"%s\",\"slotSize\":%u,\"securityVersion\":%u}",
-                 ota_status.ready ? "true" : "false",
-                 ota_status.confirmation_pending ? "true" : "false",
-                 ota_status.running_partition != NULL ? ota_status.running_partition->label : "",
-                 ota_status.next_partition != NULL ? ota_status.next_partition->label : "",
-                 ota_status.next_partition != NULL ? (unsigned)ota_status.next_partition->size : 0U,
-                 (unsigned)ota_status.current_epoch);
+                 ota_status->ready ? "true" : "false",
+                 ota_status->confirmation_pending ? "true" : "false",
+                 ota_status->running_partition != NULL ? ota_status->running_partition->label : "",
+                 ota_status->next_partition != NULL ? ota_status->next_partition->label : "",
+                 ota_status->next_partition != NULL ? (unsigned)ota_status->next_partition->size : 0U,
+                 (unsigned)ota_status->current_epoch);
     }
     else {
         snprintf(ota_json, sizeof(ota_json),
@@ -249,15 +274,15 @@ static esp_err_t status_get(httpd_req_t *req) {
         (unsigned)app_desc->secure_version,
         elf_sha_hex,
         image_sha_json,
-        secure_boot ? "true" : "false",
-        flash_encryption ? "true" : "false",
-        secure_version,
-        rom_download ? "true" : "false",
-        usb_download ? "true" : "false",
-        pm_readback ? "true" : "false",
-        pm.min_freq_mhz,
-        pm.max_freq_mhz,
-        pm.light_sleep_enable ? "true" : "false",
+        status_snapshot.secure_boot ? "true" : "false",
+        status_snapshot.flash_encryption ? "true" : "false",
+        status_snapshot.secure_version,
+        status_snapshot.rom_download ? "true" : "false",
+        status_snapshot.usb_download ? "true" : "false",
+        status_snapshot.pm_readback ? "true" : "false",
+        status_snapshot.pm.min_freq_mhz,
+        status_snapshot.pm.max_freq_mhz,
+        status_snapshot.pm.light_sleep_enable ? "true" : "false",
         ota_json);
     if (len < 0 || (size_t)len >= sizeof(body)) {
         return json_response(req, "500 Internal Server Error",
@@ -276,12 +301,16 @@ static esp_err_t config_get(httpd_req_t *req) {
         return management_transport_error(req, err);
     }
 
-    char body[240];
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    char body[320];
     snprintf(body, sizeof(body),
-             "{\"supported\":%u,\"enabled\":%u,\"configured\":%s,\"locked\":%s,\"restartRequired\":true,\"csrf\":\"%s\"}",
+             "{\"supported\":%u,\"enabled\":%u,\"configured\":%s,\"locked\":%s,"
+             "\"projectVersion\":\"%.*s\",\"restartRequired\":true,\"csrf\":\"%s\"}",
              state.supported, state.enabled,
              state.configured ? "true" : "false",
-             state.locked ? "true" : "false", csrf_token);
+             state.locked ? "true" : "false",
+             (int)sizeof(app_desc->version), app_desc->version,
+             csrf_token);
     return json_response(req, "200 OK", body);
 }
 
@@ -439,11 +468,11 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     if (!request_session_valid(req)) {
         return json_response(req, "403 Forbidden", "{\"error\":\"invalid session token\"}");
     }
-    esp_err_t err = json_response(req, "202 Accepted", "{\"ok\":true}");
-    if (err == ESP_OK) {
-        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    esp_err_t response_err = json_response(req, "202 Accepted", "{\"ok\":true}");
+    if (response_err == ESP_OK) {
+        schedule_restart();
     }
-    return err;
+    return response_err;
 }
 
 #if CONFIG_PICO_FIDO2_BLE
@@ -460,11 +489,11 @@ static esp_err_t ble_pairing_post(httpd_req_t *req) {
     snprintf(response, sizeof(response),
              "{\"ok\":true,\"pairingWindowSec\":%u}",
              (unsigned)CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
-    err = json_response(req, "202 Accepted", response);
-    if (err == ESP_OK) {
-        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    esp_err_t response_err = json_response(req, "202 Accepted", response);
+    if (response_err == ESP_OK) {
+        schedule_restart();
     }
-    return err;
+    return response_err;
 }
 
 static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
@@ -480,11 +509,11 @@ static esp_err_t ble_bond_reset_post(httpd_req_t *req) {
     snprintf(response, sizeof(response),
              "{\"ok\":true,\"pairingWindowSec\":%u,\"resetBonds\":true}",
              (unsigned)CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC);
-    err = json_response(req, "202 Accepted", response);
-    if (err == ESP_OK) {
-        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
+    esp_err_t response_err = json_response(req, "202 Accepted", response);
+    if (response_err == ESP_OK) {
+        schedule_restart();
     }
-    return err;
+    return response_err;
 }
 #endif
 
@@ -528,7 +557,8 @@ static esp_err_t update_post(httpd_req_t *req) {
     if (req->content_len <= 0) {
         return json_response(req, "400 Bad Request", "{\"error\":\"empty firmware image\"}");
     }
-    uint8_t *chunk = malloc(2048);
+    const size_t chunk_size = 16 * 1024;
+    uint8_t *chunk = heap_caps_malloc(chunk_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (chunk == NULL) {
         return json_response(req, "503 Service Unavailable",
                              "{\"error\":\"insufficient memory for update buffer\"}");
@@ -544,7 +574,7 @@ static esp_err_t update_post(httpd_req_t *req) {
 
     size_t remaining = (size_t)req->content_len;
     while (remaining > 0) {
-        size_t wanted = remaining < 2048 ? remaining : 2048;
+        size_t wanted = remaining < chunk_size ? remaining : chunk_size;
         int received = httpd_req_recv(req, (char *)chunk, wanted);
         if (received <= 0) {
             fido_ota_abort(&session);
@@ -569,20 +599,22 @@ static esp_err_t update_post(httpd_req_t *req) {
         return ota_error_response(req, err, policy);
     }
 
-    char response[192];
-    int len = snprintf(response, sizeof(response),
-                       "{\"ok\":true,\"partition\":\"%s\",\"version\":\"%.31s\","
-                       "\"securityVersion\":%u,\"bytes\":%u}",
-                       result.partition->label, result.app_desc.version,
-                       (unsigned)result.app_desc.secure_version,
-                       (unsigned)result.image_size);
-    if (len < 0 || (size_t)len >= sizeof(response)) {
-        __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
-        return json_response(req, "500 Internal Server Error",
-                             "{\"error\":\"update installed but response encoding failed; device will restart\"}");
+    char security_version[16];
+    char image_bytes[24];
+    snprintf(security_version, sizeof(security_version), "%u",
+             (unsigned)result.app_desc.secure_version);
+    snprintf(image_bytes, sizeof(image_bytes), "%u", (unsigned)result.image_size);
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Pico-Partition", result.partition->label);
+    httpd_resp_set_hdr(req, "X-Pico-Version", result.app_desc.version);
+    httpd_resp_set_hdr(req, "X-Pico-Security-Version", security_version);
+    httpd_resp_set_hdr(req, "X-Pico-Image-Bytes", image_bytes);
+    esp_err_t response_err = httpd_resp_send(req, NULL, 0);
+    if (response_err == ESP_OK) {
+        schedule_restart();
     }
-    esp_err_t response_err = json_response(req, "202 Accepted", response);
-    __atomic_store_n(&restart_requested, true, __ATOMIC_RELEASE);
     return response_err;
 }
 #endif
@@ -739,6 +771,8 @@ static void fido_wifi_start(void) {
         return;
     }
 
+    capture_status_snapshot();
+
     esp_netif_ip_info_t ip_info;
     err = esp_netif_get_ip_info(softap_netif, &ip_info);
     if (err == ESP_OK) {
@@ -809,7 +843,10 @@ void fido_wifi_task(void) {
     TickType_t last = __atomic_load_n(&last_activity_tick, __ATOMIC_ACQUIRE);
     bool idle_expired = now - last >= pdMS_TO_TICKS(CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC * 1000U);
     bool restart = __atomic_load_n(&restart_requested, __ATOMIC_ACQUIRE);
-    if (!idle_expired && !restart) {
+    TickType_t restart_tick = __atomic_load_n(&restart_requested_tick, __ATOMIC_RELAXED);
+    bool restart_due = restart &&
+        now - restart_tick >= pdMS_TO_TICKS(1000U);
+    if (!idle_expired && !restart_due) {
         return;
     }
     if (!card_try_claim_maintenance()) {

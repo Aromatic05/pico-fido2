@@ -91,9 +91,19 @@ config PICO_FIDO2_AB_OTA
         feature uses ESP-IDF software rollback and does not advance the
         irreversible SECURE_VERSION eFuse.
 
+config PICO_FIDO2_DEVELOPMENT_INSECURE_OTA
+    bool "Development OTA before Secure Boot / Flash Encryption"
+    default n
+    depends on PICO_FIDO2_AB_OTA && PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN
+    help
+        Development-only bring-up switch. Permit A/B OTA while Secure Boot and
+        Flash Encryption are still disabled so the update/rollback path can be
+        proven on hardware before any irreversible eFuse provisioning. Do not
+        enable this in a secured or production profile.
+
 config PICO_FIDO2_OTA_CONFIRM_DELAY_SEC
     int "A/B OTA boot confirmation delay in seconds"
-    range 1 30
+    range 1 300
     default 5
     depends on PICO_FIDO2_AB_OTA
     help

@@ -43,8 +43,11 @@ esp_err_t fido_ota_get_status(fido_ota_status_t *status) {
         }
     }
 
-    status->ready = status->secure_boot && status->flash_encryption &&
-                    status->running_partition != NULL &&
+    bool security_ready = status->secure_boot && status->flash_encryption;
+#if CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA
+    security_ready = true;
+#endif
+    status->ready = security_ready && status->running_partition != NULL &&
                     status->next_partition != NULL &&
                     esp_ota_get_app_partition_count() >= 2;
     return ESP_OK;

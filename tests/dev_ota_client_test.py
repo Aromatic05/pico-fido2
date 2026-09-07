@@ -67,19 +67,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         assert self.path == "/api/update"
         Handler.received = self.rfile.read(int(self.headers["Content-Length"]))
-        body = json.dumps(
-            {
-                "ok": True,
-                "partition": "ota_1",
-                "version": "test",
-                "securityVersion": 0,
-                "bytes": len(Handler.received),
-            }
-        ).encode()
         self.send_response(202)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Pico-Partition", "ota_1")
+        self.send_header("X-Pico-Version", "test")
+        self.send_header("X-Pico-Security-Version", "0")
+        self.send_header("X-Pico-Image-Bytes", str(len(Handler.received)))
+        self.send_header("Content-Length", "0")
         self.end_headers()
-        self.wfile.write(body)
 
 
 def test_http_client() -> None:
@@ -94,6 +88,10 @@ def test_http_client() -> None:
             assert wait_for_portal(base, 2)["ota"]["ready"] is True
             result = upload_firmware(base, image)
             assert result["ok"] is True
+            assert result["partition"] == "ota_1"
+            assert result["version"] == "test"
+            assert result["securityVersion"] == "0"
+            assert result["bytes"] == str(len(image.read_bytes()))
             assert Handler.received == image.read_bytes()
     finally:
         server.shutdown()

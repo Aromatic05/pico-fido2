@@ -60,6 +60,18 @@ def upload_firmware(base_url: str, firmware: Path) -> dict:
             connection.send(chunk)
 
     response = connection.getresponse()
+    if response.status == 202:
+        payload = {
+            "ok": True,
+            "partition": response.getheader("X-Pico-Partition"),
+            "version": response.getheader("X-Pico-Version"),
+            "securityVersion": response.getheader("X-Pico-Security-Version"),
+            "bytes": response.getheader("X-Pico-Image-Bytes"),
+        }
+        response.read()
+        connection.close()
+        return payload
+
     body = response.read()
     connection.close()
     try:
@@ -68,7 +80,7 @@ def upload_firmware(base_url: str, firmware: Path) -> dict:
         raise SystemExit(
             f"OTA returned HTTP {response.status} with non-JSON body: {body[:200]!r}"
         ) from exc
-    if response.status != 202 or payload.get("ok") is not True:
+    if payload.get("ok") is not True:
         raise SystemExit(f"OTA rejected: HTTP {response.status}: {payload}")
     return payload
 

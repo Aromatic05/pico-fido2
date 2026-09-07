@@ -204,6 +204,7 @@ def verify_wifi_commissioning() -> None:
     bond_reset_post = function_body(source, "ble_bond_reset_post")
     reboot_post = function_body(source, "reboot_post")
     status_get = function_body(source, "status_get")
+    status_capture = function_body(source, "capture_status_snapshot")
     init = function_body(source, "fido_wifi_init")
     task = function_body(source, "fido_wifi_task")
     dev_start = function_body(source, "picokey_vendor_maintenance_start")
@@ -241,21 +242,27 @@ def verify_wifi_commissioning() -> None:
             "Wi-Fi-only builds must report BLE capability explicitly and compile BLE maintenance handlers only when BLE exists")
     require("#if CONFIG_PICO_FIDO2_BLE\n        {.uri = \"/api/ble/pairing\"" in source,
             "Wi-Fi-only builds must not register BLE maintenance routes")
-    require("esp_secure_boot_enabled()" in status_get and
-            "esp_flash_encryption_enabled()" in status_get and
-            "esp_efuse_read_secure_version()" in status_get,
-            "maintenance status must use public ESP-IDF read-only security-state APIs")
-    require("ESP_EFUSE_DIS_DOWNLOAD_MODE" in status_get and
-            "ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" in status_get,
-            "maintenance status must expose both retained ROM recovery paths")
-    require("esp_pm_get_configuration(&pm)" in status_get and
+    require("esp_secure_boot_enabled()" in status_capture and
+            "esp_flash_encryption_enabled()" in status_capture and
+            "esp_efuse_read_secure_version()" in status_capture,
+            "maintenance status snapshot must use public ESP-IDF read-only security-state APIs")
+    require("ESP_EFUSE_DIS_DOWNLOAD_MODE" in status_capture and
+            "ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" in status_capture,
+            "maintenance status snapshot must retain both ROM recovery-path readbacks")
+    require("esp_pm_get_configuration(&next.pm)" in status_capture and
             '\\"minCpuMHz\\"' in status_get and '\\"maxCpuMHz\\"' in status_get and
             '\\"lightSleep\\"' in status_get,
-            "maintenance status must expose configured DFS/light-sleep bounds")
+            "maintenance status must expose core0-captured DFS/light-sleep bounds")
+    for forbidden in ("esp_pm_get_configuration", "esp_efuse_read_secure_version",
+                      "esp_secure_boot_enabled", "esp_flash_encryption_enabled",
+                      "esp_ota_get_state_partition"):
+        require(forbidden not in status_get,
+                f"HTTP status handler must serialize a snapshot instead of calling {forbidden}")
+    require("capture_status_snapshot();" in start,
+            "maintenance startup must capture status on core0 before HTTP service")
     require("esp_app_get_description()" in status_get and
-            "esp_ota_get_running_partition()" in status_get and
-            "esp_partition_get_sha256" in status_get,
-            "maintenance status must derive firmware provenance from public ESP-IDF app/partition APIs")
+            "esp_partition_get_sha256" not in status_get,
+            "maintenance status must use the public app descriptor without hashing the full running partition on the HTTP task")
     require('\\"projectVersion\\"' in status_get and
             '\\"securityVersion\\"' in status_get and
             '\\"appElfSha256\\"' in status_get and
@@ -273,6 +280,10 @@ def verify_wifi_commissioning() -> None:
                 f"{label} must not add a second physical authorization inside maintenance")
         require("request_session_valid(req)" in body,
                 f"{label} must use the common maintenance-session request policy")
+    for label, body in (("pairing", pairing_post), ("bond reset", bond_reset_post),
+                        ("reboot", reboot_post)):
+        before(body, 'json_response(req, "202 Accepted"', "schedule_restart()",
+               f"{label} must send its 202 response before starting the reboot delay")
     require("CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in request_session and
             "return true" in request_session and "csrf_valid(req)" in request_session,
             "development must bypass portal session authorization while production retains CSRF integrity")
@@ -347,6 +358,7 @@ def verify_ab_ota() -> None:
     policy = text(WIFI_OTA_POLICY)
     defaults = text(SECURE_OTA_DEFAULTS)
     security_defaults = text(SECURITY_PREPROVISIONED_DEFAULTS)
+    development_defaults = text(DEVELOPMENT_MAINTENANCE_DEFAULTS)
     partitions = text(SECURE_OTA_PARTITIONS)
     transport_kconfig = text(TRANSPORT_KCONFIG)
     fido2_cmake = text(FIDO2_CMAKE)
@@ -391,10 +403,24 @@ def verify_ab_ota() -> None:
             "firmware upload must use the active maintenance session without a second BOOT confirmation")
     require("httpd_req_recv" in update_post and "fido_ota_write(&session" in update_post,
             "firmware upload must stream into the bounded OTA writer instead of buffering the image")
+    before(update_post, "httpd_resp_send(req, NULL, 0)", "schedule_restart()",
+           "OTA must send its 202 response before starting the reboot delay")
 
-    require("esp_secure_boot_enabled()" in function_body(ota, "fido_ota_get_status") and
-            "esp_flash_encryption_enabled()" in function_body(ota, "fido_ota_get_status"),
-            "A/B updates must fail closed unless Secure Boot and Flash Encryption are active")
+    status = function_body(ota, "fido_ota_get_status")
+    portal_status = function_body(portal, "status_get")
+    require("esp_partition_get_sha256" not in portal_status,
+            "maintenance status must not hash the full running partition on the HTTP task")
+    require("esp_secure_boot_enabled()" in status and
+            "esp_flash_encryption_enabled()" in status and
+            "status->secure_boot && status->flash_encryption" in status,
+            "production A/B updates must fail closed unless Secure Boot and Flash Encryption are active")
+    require("CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA" in status and
+            "security_ready = true" in status,
+            "pre-security OTA bypass must remain an explicit compile-time development path")
+    require("CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA=y" in development_defaults,
+            "development maintenance profile must explicitly opt into reversible pre-security OTA")
+    require("depends on PICO_FIDO2_AB_OTA && PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN" in transport_kconfig,
+            "insecure OTA must depend on both A/B OTA and the explicit development maintenance profile")
     before(begin, "card_try_claim_maintenance()", "esp_ota_begin(session->partition",
            "OTA writes must own the global card maintenance lease before erasing an inactive slot")
     require("esp_ota_abort(session->handle)" in function_body(ota, "fido_ota_abort"),
