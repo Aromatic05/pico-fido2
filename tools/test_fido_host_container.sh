@@ -13,6 +13,13 @@ fail() {
 command -v "$runtime" >/dev/null || fail "$runtime not found"
 [[ -f pico-fido/tests/docker/bookworm/Dockerfile ]] || fail 'run from pico-fido2 repository root'
 
+host_eddsa_dir="$(mktemp -d "${TMPDIR:-/tmp}/pico-fido2-host-eddsa.XXXXXX")"
+cleanup_host() {
+    rm -rf "$host_eddsa_dir"
+}
+trap cleanup_host EXIT
+./tools/prepare_host_eddsa_mbedtls.sh "$host_eddsa_dir"
+
 # Product correctness gates must run with every normal host FIDO test.  The
 # heavier sanitizer/durability/ESP32 build remains in test_transport_ownership_gate.sh.
 python3 tests/formal_state_model.py
@@ -25,10 +32,11 @@ if ! "$runtime" image exists "$image" >/dev/null 2>&1; then
 fi
 
 "$runtime" run --rm -i --network none -v "$PWD:/src:ro" \
+    -v "$host_eddsa_dir:/src/pico-keys-sdk/mbedtls:ro" \
     -e FIDO_PYTEST_TARGET="$pytest_target" "$image" bash -s <<'INNER'
 set -euo pipefail
 mkdir -p /work/build /work/run /work/pytest-cache
-cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
+cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DENABLE_EDDSA=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
 cmake --build /work/build -j"$(nproc)" >/work/build.log
 
 cd /src

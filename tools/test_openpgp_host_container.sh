@@ -3,6 +3,7 @@ set -euo pipefail
 
 runtime="${CONTAINER_RUNTIME:-podman}"
 image="${OPENPGP_TEST_IMAGE:-localhost/pico-fido2-piv-test:jammy}"
+pytest_target="${OPENPGP_PYTEST_TARGET:-tests}"
 
 fail() {
     echo "openpgp-host: $*" >&2
@@ -12,15 +13,24 @@ fail() {
 command -v "$runtime" >/dev/null || fail "$runtime not found"
 [[ -f pico-openpgp/tests/docker/jammy/Dockerfile ]] || fail 'run from pico-fido2 repository root'
 
+host_eddsa_dir="$(mktemp -d "${TMPDIR:-/tmp}/pico-fido2-host-eddsa.XXXXXX")"
+cleanup_host() {
+    rm -rf "$host_eddsa_dir"
+}
+trap cleanup_host EXIT
+./tools/prepare_host_eddsa_mbedtls.sh "$host_eddsa_dir"
+
 if ! "$runtime" image exists "$image" >/dev/null 2>&1; then
     "$runtime" build -f pico-openpgp/tests/docker/jammy/Dockerfile \
         -t "$image" pico-openpgp
 fi
 
-"$runtime" run --rm -i --network none -v "$PWD:/src:ro" "$image" bash -s <<'INNER'
+"$runtime" run --rm -i --network none -v "$PWD:/src:ro" \
+    -v "$host_eddsa_dir:/src/pico-keys-sdk/mbedtls:ro" \
+    -e OPENPGP_PYTEST_TARGET="$pytest_target" "$image" bash -s <<'INNER'
 set -euo pipefail
 mkdir -p /work/build /work/run /work/pytest-cache
-cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
+cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DENABLE_EDDSA=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
 cmake --build /work/build -j"$(nproc)" >/work/build.log
 
 /usr/sbin/pcscd --foreground >/work/pcscd.log 2>&1 &
@@ -64,6 +74,7 @@ print(f'OpenPGP reset clears PW1 authentication: PASS ({s1:02x}{s2:02x})')
 PYRESET
 
 cd /src/pico-openpgp
+read -r -a pytest_targets <<< "$OPENPGP_PYTEST_TARGET"
 PYTHONPATH=/src/pico-openpgp/tests \
-    pytest -q -o cache_dir=/work/pytest-cache tests -W ignore::DeprecationWarning
+    pytest -q -o cache_dir=/work/pytest-cache "${pytest_targets[@]}" -W ignore::DeprecationWarning
 INNER
