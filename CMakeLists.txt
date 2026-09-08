@@ -22,6 +22,31 @@ set(USB_PID 0x0407)
 add_compile_definitions(PICO_FIDO_DEVICE_VERSION=0x0507)
 
 if(ESP_PLATFORM)
+    set(_aromatic_idf_mbedtls "$ENV{IDF_PATH}/components/mbedtls")
+    if(NOT EXISTS "${_aromatic_idf_mbedtls}/mbedtls/include/mbedtls/eddsa.h" OR
+       NOT EXISTS "${_aromatic_idf_mbedtls}/mbedtls/library/eddsa.c")
+        message(FATAL_ERROR
+            "ESP-IDF 5.5 does not contain the Aromatic Key Ed25519 backend. "
+            "Run ${CMAKE_CURRENT_LIST_DIR}/tools/prepare_esp32s3_ed25519.sh first.")
+    endif()
+    file(STRINGS "${_aromatic_idf_mbedtls}/Kconfig" _aromatic_eddsa_kconfig
+         REGEX "^[ \t]*config MBEDTLS_EDDSA_C$")
+    file(STRINGS "${_aromatic_idf_mbedtls}/mbedtls/library/oid.c" _aromatic_ed25519_oid
+         REGEX "MBEDTLS_OID_ED25519")
+    file(STRINGS "${_aromatic_idf_mbedtls}/mbedtls/library/pk_internal.h" _aromatic_ed25519_rfc8410
+         REGEX "MBEDTLS_ECP_DP_ED25519")
+    if(NOT _aromatic_eddsa_kconfig OR
+       NOT _aromatic_ed25519_oid OR
+       NOT _aromatic_ed25519_rfc8410)
+        message(FATAL_ERROR
+            "ESP-IDF 5.5 EdDSA/RFC8410 support is incomplete. "
+            "Run ${CMAKE_CURRENT_LIST_DIR}/tools/prepare_esp32s3_ed25519.sh first.")
+    endif()
+    unset(_aromatic_eddsa_kconfig)
+    unset(_aromatic_ed25519_oid)
+    unset(_aromatic_ed25519_rfc8410)
+    unset(_aromatic_idf_mbedtls)
+
     set(EXTRA_COMPONENT_DIRS
         src/fido2
         pico-keys-sdk/src
