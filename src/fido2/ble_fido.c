@@ -223,6 +223,54 @@ static bool fido_ble_clear_all_bonds(void) {
     return true;
 }
 
+static esp_err_t fido_ble_clear_action_namespace(void) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FIDO_BLE_PAIRING_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_erase_all(handle);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t fido_ble_factory_reset(void) {
+    esp_err_t err = fido_ble_clear_action_namespace();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "factory reset action-state erase failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    fido_ble_pairing_policy_init(
+        &pairing_policy,
+        CONFIG_PICO_FIDO2_BLE_PAIRING_WINDOW_SEC * 1000U,
+        false,
+        board_millis());
+    gatt_reject_after_pairing = false;
+
+    if (!ble_stack_running) {
+        /* The NimBLE store is unavailable while commissioning owns the
+         * radio. Persist a no-grant cleanup action for the next BLE start. */
+        return fido_ble_schedule_actions(false, true);
+    }
+
+    if (!fido_ble_clear_all_bonds()) {
+        (void)fido_ble_schedule_actions(false, true);
+        return ESP_FAIL;
+    }
+
+    if (gatt_connection_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int rc = ble_gap_terminate(gatt_connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "factory reset BLE disconnect failed: %d", rc);
+        }
+    }
+    return ESP_OK;
+}
+
 static void fido_ble_queue_event(fido_ble_event_t event) {
     if (event_queue == NULL || xQueueSend(event_queue, &event, 0) != pdPASS) {
         ESP_LOGE(TAG, "event queue full: %d", event.type);
