@@ -84,6 +84,51 @@ def recv_hid_message(sock: socket.socket, expected_cid: bytes, expected_command:
         return bytes(data[:total])
 
 
+def u2f_apdu(hid: socket.socket, cid: bytes, ins: int, p1: int = 0, p2: int = 0, data: bytes = b"") -> tuple[bytes, int]:
+    apdu = struct.pack(">BBBBBH", 0, ins, p1, p2, 0, len(data)) + data + b"\0\0"
+    send_frame(
+        hid,
+        (cid + bytes([CTAPHID_MSG]) + struct.pack("!H", len(apdu)) + apdu[:57]).ljust(64, b"\0"),
+    )
+    if len(apdu) > 57:
+        remaining = apdu[57:]
+        sequence = 0
+        while remaining:
+            chunk = remaining[:59]
+            remaining = remaining[59:]
+            send_frame(hid, (cid + bytes([sequence]) + chunk).ljust(64, b"\0"))
+            sequence += 1
+    response = recv_hid_message(hid, cid, CTAPHID_MSG)
+    if len(response) < 2:
+        raise RuntimeError("short U2F APDU response")
+    return response[:-2], int.from_bytes(response[-2:], "big")
+
+
+def u2f_register(hid: socket.socket, cid: bytes) -> tuple[bytes, bytes, bytes]:
+    client = hashlib.sha256(b"reset-isolation-client").digest()
+    app = hashlib.sha256(b"https://reset-isolation.invalid").digest()
+    response, sw = u2f_apdu(hid, cid, 0x01, data=client + app)
+    if sw != 0x9000:
+        raise RuntimeError(f"U2F REGISTER failed: {sw:04x}")
+    if len(response) < 67 or response[0] != 0x05 or response[1] != 0x04:
+        raise RuntimeError(f"malformed U2F REGISTER response: {response[:80].hex()}")
+    key_handle_len = response[66]
+    if key_handle_len == 0 or len(response) < 67 + key_handle_len:
+        raise RuntimeError("malformed U2F key handle")
+    return client, app, response[67:67 + key_handle_len]
+
+
+def u2f_check_key_handle(hid: socket.socket, cid: bytes, client: bytes, app: bytes, key_handle: bytes) -> int:
+    _, sw = u2f_apdu(
+        hid,
+        cid,
+        0x02,
+        p1=0x07,
+        data=client + app + bytes([len(key_handle)]) + key_handle,
+    )
+    return sw
+
+
 def fido_get_info(hid: socket.socket, cid: bytes) -> bytes:
     send_frame(hid, hid_init_packet(cid, CTAPHID_CBOR, b"\x04"))
     response = recv_hid_message(hid, cid, CTAPHID_CBOR)
@@ -101,6 +146,13 @@ def fido_get_pin_retries(hid: socket.socket, cid: bytes) -> bytes:
     if response != bytes.fromhex("00a10308"):
         raise RuntimeError(f"CTAP2 getPINRetries failed: {response.hex()}")
     return response
+
+
+def fido_reset(hid: socket.socket, cid: bytes) -> None:
+    send_frame(hid, hid_init_packet(cid, CTAPHID_CBOR, b"\x07"))
+    response = recv_hid_message(hid, cid, CTAPHID_CBOR)
+    if response != b"\x00":
+        raise RuntimeError(f"CTAP2 authenticatorReset failed: {response.hex()}")
 
 
 def hid_oath_apdu(hid: socket.socket, cid: bytes, apdu: bytes) -> bytes:
@@ -344,6 +396,370 @@ def run_smoke(binary: Path) -> None:
             if sw != 0x9000:
                 raise RuntimeError(f"HID OATH authentication changed CCID OATH: {sw:04x}")
             print("CCID and HID OATH authentication sessions are independent: PASS")
+
+            # OpenPGP and PIV share DEK storage but must never share an
+            # authenticated session. Switching AIDs must unload the previous
+            # applet so a stale wrapper selector cannot affect the new applet.
+            pw3_switch = b"12345678"
+            piv_pin_switch = b"123456\xff\xff"
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select before applet-switch test failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x83, len(pw3_switch)]) + pw3_switch,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP PW3 verify before applet switch failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select during applet-switch test failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP reselect during applet-switch test failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00200083"))
+            if sw == 0x9000:
+                raise RuntimeError("OpenPGP PW3 authentication survived an applet switch")
+
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV reselect during applet-switch test failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x80, len(piv_pin_switch)]) + piv_pin_switch,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"PIV PIN verify before applet switch failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select after PIV verify failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after OpenPGP switch failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00200080"))
+            if sw == 0x9000:
+                raise RuntimeError("PIV PIN authentication survived an applet switch")
+            print("OpenPGP/PIV applet switches clear cross-applet authentication: PASS")
+
+            # Cross-applet factory-reset isolation. A valid non-resident U2F
+            # handle is the closest emulator analogue to the GitHub/Google
+            # security-key registrations that were invalidated by a global
+            # flash reset.
+            client_hash, app_hash, key_handle = u2f_register(hid, assigned_cid)
+            if u2f_check_key_handle(hid, assigned_cid, client_hash, app_hash, key_handle) != 0x6985:
+                raise RuntimeError("new U2F key handle failed CHECK_ONLY before reset")
+
+            # Give PIV a non-default PIN so OpenPGP reset must preserve PIV
+            # state, not merely leave the applet selectable.
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV reselect failed: {sw:04x}")
+            default_piv_pin = b"123456\xff\xff"
+            changed_piv_pin = b"654321\xff\xff"
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x24, 0x00, 0x80, 16]) + default_piv_pin + changed_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"PIV PIN change failed: {sw:04x}")
+
+            # Mirror ykman openpgp reset: select, authenticate PW3,
+            # TERMINATE DF, ACTIVATE FILE.
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP reselect failed: {sw:04x}")
+            pw3 = b"12345678"
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x83, len(pw3)]) + pw3)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP PW3 verify failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00E60000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP TERMINATE DF failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("00440000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP ACTIVATE FILE failed: {sw:04x}")
+
+            u2f_after_openpgp = u2f_check_key_handle(hid, assigned_cid, client_hash, app_hash, key_handle)
+            if u2f_after_openpgp != 0x6985:
+                raise RuntimeError(
+                    f"OpenPGP reset invalidated FIDO key handle: {u2f_after_openpgp:04x}"
+                )
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after OpenPGP reset failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x80, len(changed_piv_pin)]) + changed_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP reset changed PIV PIN: {sw:04x}")
+            print("OpenPGP factory reset preserves FIDO identity and PIV PIN: PASS")
+
+            # Store an OpenPGP-owned data object, then factory-reset PIV and
+            # prove the OpenPGP object and FIDO root both survive.
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select before PIV reset failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x83, len(pw3)]) + pw3)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP PW3 verify after reset failed: {sw:04x}")
+            marker = b"reset-isolation"
+            _, sw = raw_apdu(ccid, bytes([0x00, 0xDA, 0x00, 0x5B, len(marker)]) + marker)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP cardholder-name write failed: {sw:04x}")
+
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select before factory reset failed: {sw:04x}")
+            wrong = b"000000\xff\xff"
+            for _ in range(3):
+                raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x80, len(wrong)]) + wrong)
+            wrong_puk = b"00000000"
+            replacement_pin = b"111111\xff\xff"
+            for _ in range(3):
+                raw_apdu(
+                    ccid,
+                    bytes([0x00, 0x24, 0x00, 0x81, 16]) + wrong_puk + replacement_pin,
+                )
+            _, sw = raw_apdu(ccid, bytes.fromhex("00FB0000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"PIV factory reset failed: {sw:04x}")
+
+            u2f_after_piv = u2f_check_key_handle(hid, assigned_cid, client_hash, app_hash, key_handle)
+            if u2f_after_piv != 0x6985:
+                raise RuntimeError(f"PIV reset invalidated FIDO key handle: {u2f_after_piv:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select after PIV reset failed: {sw:04x}")
+            name_after_piv = openpgp_get_data(ccid, 0x005B)
+            if name_after_piv != marker:
+                raise RuntimeError(
+                    f"PIV reset changed OpenPGP cardholder data: {name_after_piv!r}"
+                )
+            print("PIV factory reset preserves FIDO identity and OpenPGP data: PASS")
+
+            # authenticatorReset rotates FIDO state but must preserve the
+            # sibling CCID applets that share the same physical flash store.
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select before FIDO reset failed: {sw:04x}")
+            post_reset_piv_pin = b"765432\xff\xff"
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x24, 0x00, 0x80, 16]) + default_piv_pin + post_reset_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"PIV PIN change before FIDO reset failed: {sw:04x}")
+
+            fido_reset(hid, assigned_cid)
+            if u2f_check_key_handle(hid, assigned_cid, client_hash, app_hash, key_handle) == 0x6985:
+                raise RuntimeError("FIDO reset failed to invalidate the old FIDO key handle")
+
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select after FIDO reset failed: {sw:04x}")
+            name_after_fido = openpgp_get_data(ccid, 0x005B)
+            if name_after_fido != marker:
+                raise RuntimeError(
+                    f"FIDO reset changed OpenPGP cardholder data: {name_after_fido!r}"
+                )
+
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after FIDO reset failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x80, len(post_reset_piv_pin)]) + post_reset_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"FIDO reset changed PIV PIN: {sw:04x}")
+
+            oath_after_fido, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH select after FIDO reset failed: {sw:04x}")
+            try:
+                tlv_value(oath_after_fido, 0x74)
+            except RuntimeError as exc:
+                raise RuntimeError("FIDO reset erased the OATH access-code record") from exc
+            _, sw = raw_apdu(ccid, bytes.fromhex("00A10000"))
+            if sw != 0x6982:
+                raise RuntimeError(
+                    f"OATH access code was not enforced after FIDO reset: {sw:04x}"
+                )
+            print("FIDO factory reset rotates FIDO identity and preserves OpenPGP/PIV/OATH: PASS")
+
+            # OATH reset is application-local. It must remove the OATH access
+            # code while leaving FIDO, PIV and OpenPGP untouched.
+            client_after_fido, app_after_fido, handle_after_fido = u2f_register(hid, assigned_cid)
+            _, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH select before reset failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("0004DEAD"))
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH factory reset failed: {sw:04x}")
+            if u2f_check_key_handle(hid, assigned_cid, client_after_fido, app_after_fido, handle_after_fido) != 0x6985:
+                raise RuntimeError("OATH reset invalidated FIDO key handle")
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after OATH reset failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x80, len(post_reset_piv_pin)]) + post_reset_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH reset changed PIV PIN: {sw:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000 or openpgp_get_data(ccid, 0x005B) != marker:
+                raise RuntimeError("OATH reset changed OpenPGP cardholder data")
+            oath_after_reset, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH reselect after reset failed: {sw:04x}")
+            try:
+                tlv_value(oath_after_reset, 0x74)
+                raise RuntimeError("OATH reset left the access-code challenge active")
+            except RuntimeError as exc:
+                if "left the access-code" in str(exc):
+                    raise
+            _, sw = raw_apdu(ccid, bytes.fromhex("00A10000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH reset did not restore unlocked empty state: {sw:04x}")
+            print("OATH factory reset preserves FIDO/PIV/OpenPGP: PASS")
+
+            # HSM Auth reset must likewise be local. Change its management key,
+            # reset it, then prove the default key works again and siblings survive.
+            hsmauth_aid = bytes.fromhex("A000000527210701")
+            select_hsmauth = bytes([0x00, 0xA4, 0x04, 0x00, len(hsmauth_aid)]) + hsmauth_aid
+            _, sw = raw_apdu(ccid, select_hsmauth)
+            if sw != 0x9000:
+                raise RuntimeError(f"HSM Auth select failed: {sw:04x}")
+            hsm_default = bytes(16)
+            hsm_key_a = bytes(range(1, 17))
+            hsm_key_b = bytes(range(17, 33))
+
+            def hsm_change_key(old: bytes, new: bytes) -> int:
+                data = bytes([0x7B, 16]) + old + bytes([0x7B, 16]) + new
+                _, status = raw_apdu(ccid, bytes([0x00, 0x08, 0x00, 0x00, len(data)]) + data)
+                return status
+
+            if hsm_change_key(hsm_default, hsm_key_a) != 0x9000:
+                raise RuntimeError("HSM Auth management-key setup failed")
+            _, sw = raw_apdu(ccid, bytes.fromhex("0006DEAD"))
+            if sw != 0x9000:
+                raise RuntimeError(f"HSM Auth reset failed: {sw:04x}")
+            if hsm_change_key(hsm_default, hsm_key_b) != 0x9000:
+                raise RuntimeError("HSM Auth reset did not restore default management key")
+            if u2f_check_key_handle(hid, assigned_cid, client_after_fido, app_after_fido, handle_after_fido) != 0x6985:
+                raise RuntimeError("HSM Auth reset invalidated FIDO key handle")
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after HSM Auth reset failed: {sw:04x}")
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x20, 0x00, 0x80, len(post_reset_piv_pin)]) + post_reset_piv_pin,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"HSM Auth reset changed PIV PIN: {sw:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000 or openpgp_get_data(ccid, 0x005B) != marker:
+                raise RuntimeError("HSM Auth reset changed OpenPGP cardholder data")
+            print("HSM Auth factory reset preserves FIDO/PIV/OpenPGP: PASS")
+
+            # OpenPGP Reset Code owns a distinct DEK wrapper. Verify the
+            # recovery path can use RC alone to replace PW1.
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select before Reset Code test failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x83, len(pw3)]) + pw3)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP PW3 verify before Reset Code test failed: {sw:04x}")
+            reset_code = b"87654321"
+            _, sw = raw_apdu(ccid, bytes([0x00, 0xDA, 0x00, 0xD3, len(reset_code)]) + reset_code)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP Reset Code setup failed: {sw:04x}")
+            new_pw1 = b"246810"
+            reset_retry_data = reset_code + new_pw1
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x2C, 0x00, 0x81, len(reset_retry_data)]) + reset_retry_data,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP Reset Code recovery failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x81, len(new_pw1)]) + new_pw1)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP PW1 did not change via Reset Code: {sw:04x}")
+            print("OpenPGP Reset Code recovery: PASS")
+
+            # Re-seed OATH so a management-level device reset has state in
+            # every major applet to destroy.
+            _, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH select before device reset failed: {sw:04x}")
+            reset_challenge = bytes(range(9, 17))
+            reset_response = hmac.new(oath_key, reset_challenge, hashlib.sha1).digest()
+            reset_code_data = (
+                bytes([0x73, len(oath_key) + 1, 0x21]) + oath_key
+                + bytes([0x74, len(reset_challenge)]) + reset_challenge
+                + bytes([0x75, len(reset_response)]) + reset_response
+            )
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x03, 0x00, 0x00, len(reset_code_data)]) + reset_code_data,
+            )
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH setup before device reset failed: {sw:04x}")
+
+            full_client, full_app, full_handle = u2f_register(hid, assigned_cid)
+            management_aid = bytes.fromhex("D2760000850101")
+            select_management = bytes([0x00, 0xA4, 0x04, 0x00, len(management_aid)]) + management_aid
+            _, sw = raw_apdu(ccid, select_management)
+            if sw != 0x9000:
+                raise RuntimeError(f"Management select failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes.fromhex("001E0000"))
+            if sw != 0x9000:
+                raise RuntimeError(f"Management full-device reset failed: {sw:04x}")
+
+            if u2f_check_key_handle(hid, assigned_cid, full_client, full_app, full_handle) == 0x6985:
+                raise RuntimeError("Management device reset failed to rotate FIDO identity")
+            _, sw = raw_apdu(ccid, piv_select)
+            if sw not in (0x6100, 0x9000) and (sw >> 8) != 0x61:
+                raise RuntimeError(f"PIV select after device reset failed: {sw:04x}")
+            _, sw = raw_apdu(ccid, bytes([0x00, 0x20, 0x00, 0x80, len(default_piv_pin)]) + default_piv_pin)
+            if sw != 0x9000:
+                raise RuntimeError(f"Management device reset did not restore default PIV PIN: {sw:04x}")
+            _, sw = raw_apdu(ccid, select)
+            if sw != 0x9000:
+                raise RuntimeError(f"OpenPGP select after device reset failed: {sw:04x}")
+            if openpgp_get_data(ccid, 0x005B) != b"":
+                raise RuntimeError("Management device reset preserved OpenPGP cardholder data")
+            pw_status = openpgp_get_data(ccid, 0x00C4)
+            if len(pw_status) < 7 or pw_status[5] != 0:
+                raise RuntimeError(
+                    f"OpenPGP factory state exposed RC retries: {pw_status.hex()}"
+                )
+            default_rc = b"12345678"
+            forbidden_new_pw1 = b"135791"
+            forbidden_reset = default_rc + forbidden_new_pw1
+            _, sw = raw_apdu(
+                ccid,
+                bytes([0x00, 0x2C, 0x00, 0x81, len(forbidden_reset)]) + forbidden_reset,
+            )
+            if sw == 0x9000:
+                raise RuntimeError("OpenPGP factory state exposed a default Reset Code")
+            oath_after_device_reset, sw = raw_apdu(ccid, select_oath)
+            if sw != 0x9000:
+                raise RuntimeError(f"OATH select after device reset failed: {sw:04x}")
+            try:
+                tlv_value(oath_after_device_reset, 0x74)
+                raise RuntimeError("Management device reset preserved OATH access code")
+            except RuntimeError as exc:
+                if "preserved OATH" in str(exc):
+                    raise
+            _, sw = raw_apdu(ccid, select_hsmauth)
+            if sw != 0x9000:
+                raise RuntimeError(f"HSM Auth select after device reset failed: {sw:04x}")
+            if hsm_change_key(hsm_default, hsm_key_a) != 0x9000:
+                raise RuntimeError("Management device reset preserved HSM Auth management key")
+            print("Management device reset wipes FIDO/PIV/OpenPGP/OATH/HSM Auth: PASS")
         except Exception:
             if log_path.exists():
                 log_text = log_path.read_text(encoding="utf-8", errors="replace")
