@@ -1,0 +1,69 @@
+diff --git a/components/mbedtls/Kconfig b/components/mbedtls/Kconfig
+index 621610a0..1c408d37 100644
+--- a/components/mbedtls/Kconfig
++++ b/components/mbedtls/Kconfig
+@@ -1065,6 +1065,13 @@ menu "mbedTLS"
+         help
+             Enable ECDSA. Needed to use ECDSA-xxx TLS ciphersuites.
+ 
++    config MBEDTLS_EDDSA_C
++        bool "Edwards-curve Digital Signature Algorithm (EdDSA)"
++        depends on MBEDTLS_ECP_C && MBEDTLS_ECP_DP_ED25519_ENABLED && MBEDTLS_SHA512_C
++        default n
++        help
++            Enable EdDSA support for Ed25519.
++
+     config MBEDTLS_ECJPAKE_C
+         bool "Elliptic curve J-PAKE"
+         depends on MBEDTLS_ECP_C
+@@ -1156,6 +1163,13 @@ menu "mbedTLS"
+         help
+             Enable support for CURVE25519 Elliptic Curve.
+ 
++    config MBEDTLS_ECP_DP_ED25519_ENABLED
++        bool "Enable Ed25519 curve"
++        depends on MBEDTLS_ECP_C
++        default n
++        help
++            Enable support for the Ed25519 Edwards curve.
++
+     config MBEDTLS_ECP_NIST_OPTIM
+         bool "NIST 'modulo p' optimisations"
+         depends on MBEDTLS_ECP_C
+diff --git a/components/mbedtls/port/include/mbedtls/esp_config.h b/components/mbedtls/port/include/mbedtls/esp_config.h
+index c5707dd6..7e171d6b 100644
+--- a/components/mbedtls/port/include/mbedtls/esp_config.h
++++ b/components/mbedtls/port/include/mbedtls/esp_config.h
+@@ -492,6 +492,11 @@
+ #else
+ #undef MBEDTLS_ECP_DP_CURVE25519_ENABLED
+ #endif
++#ifdef CONFIG_MBEDTLS_ECP_DP_ED25519_ENABLED
++#define MBEDTLS_ECP_DP_ED25519_ENABLED
++#else
++#undef MBEDTLS_ECP_DP_ED25519_ENABLED
++#endif
+ #ifdef MBEDTLS_ECP_DP_CURVE448_ENABLED
+ #undef MBEDTLS_ECP_DP_CURVE448_ENABLED
+ #endif
+@@ -2045,6 +2050,20 @@
+ #undef MBEDTLS_ECDSA_C
+ #endif
+ 
++/**
++ * \def MBEDTLS_EDDSA_C
++ *
++ * Enable the Edwards-curve Digital Signature Algorithm library.
++ *
++ * Module: library/eddsa.c
++ * Requires: MBEDTLS_ECP_C, MBEDTLS_ECP_DP_ED25519_ENABLED, MBEDTLS_SHA512_C
++ */
++#ifdef CONFIG_MBEDTLS_EDDSA_C
++#define MBEDTLS_EDDSA_C
++#else
++#undef MBEDTLS_EDDSA_C
++#endif
++
+ /**
+  * \def MBEDTLS_ECJPAKE_C
+  *
