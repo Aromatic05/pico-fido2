@@ -15,6 +15,9 @@ void fido_wifi_task(void);
 #if CONFIG_PICO_FIDO2_QEMU_RESET_SELFTEST
 void fido_reset_qemu_selftest_task(void);
 #endif
+#if CONFIG_PICO_FIDO2_QEMU_OTA_STATE_SELFTEST
+void fido_ota_state_qemu_selftest_task(void);
+#endif
 
 static void transport_nvs_init(void) {
     esp_err_t err = nvs_flash_init();
@@ -38,6 +41,9 @@ void picokey_extra_transport_init(void) {
 void picokey_extra_transport_task(void) {
 #if CONFIG_PICO_FIDO2_QEMU_RESET_SELFTEST
     fido_reset_qemu_selftest_task();
+#endif
+#if CONFIG_PICO_FIDO2_QEMU_OTA_STATE_SELFTEST
+    fido_ota_state_qemu_selftest_task();
 #endif
 #if CONFIG_PICO_FIDO2_BLE
     fido_ble_task();

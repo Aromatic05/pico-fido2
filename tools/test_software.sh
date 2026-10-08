@@ -16,6 +16,10 @@ cmake --build build-host -j2
 python tests/host_protocol_smoke.py build-host/pico_fido2
 python tests/host_hsmauth.py build-host/pico_fido2
 python tests/host_transport_contention.py build-host/pico_fido2 --iterations 50
+python tests/smartcard_persistence_gap_matrix.py build-host/pico_fido2 all
+python tests/otp_sector_powercut_matrix.py build-host/pico_fido2 all
+python tests/management_reset_powercut_matrix.py build-host/pico_fido2
+python tests/host_cross_applet_longevity.py build-host/pico_fido2 --iterations 12
 python tests/host_applet_reset_isolation.py build-host/pico_fido2
 
 cmake -S . -B build-host-analyzer \

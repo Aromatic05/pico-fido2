@@ -18,6 +18,7 @@
 #include "openpgp/openpgp.h"
 
 #define HSMAUTH_CONFIG_FID 0xBC00
+#define QEMU_JOURNAL_RECOVERY_FID 0xDF00
 
 static const uint8_t marker_openpgp[] = "qemu-openpgp";
 static const uint8_t marker_piv[] = "qemu-piv";
@@ -28,6 +29,8 @@ static const uint8_t marker_management[] = "qemu-management";
 static const uint8_t marker_fido_pin[] = "qemu-fido-pin";
 static const uint8_t marker_fido_credential[] = "qemu-resident-credential";
 static const uint8_t marker_fido_rp[] = "qemu-resident-rp";
+static const uint8_t marker_journal_old[] = "qemu-journal-old";
+static const uint8_t marker_journal_new[] = "qemu-journal-new";
 static const uint8_t marker_piv_attestation_meta[] = {0x11, 0x22, 0x33};
 
 static uint8_t expected_piv_attestation_key[PICO_KEYS_FLASH_SECTOR_SIZE];
@@ -98,6 +101,33 @@ static bool dynamic_equals(uint16_t fid, const uint8_t *data, size_t len) {
     file_t *ef = search_dynamic_file(fid);
     return file_has_data(ef) && file_get_size(ef) == len &&
            memcmp(file_get_data(ef), data, len) == 0;
+}
+
+extern void low_flash_qemu_arm_journal_cut_after_target_erase(void);
+
+static void verify_journal_recovery_or_arm_cut(void) {
+    file_t *marker = search_dynamic_file(QEMU_JOURNAL_RECOVERY_FID);
+    if (file_has_data(marker) &&
+        file_get_size(marker) == sizeof(marker_journal_new) &&
+        memcmp(file_get_data(marker), marker_journal_new, sizeof(marker_journal_new)) == 0) {
+        printf("JOURNAL_RECOVERY_QEMU_PASS\n");
+        return;
+    }
+    require(!file_has_data(marker), "unexpected journal recovery marker state");
+
+    put_dynamic(QEMU_JOURNAL_RECOVERY_FID, marker_journal_old, sizeof(marker_journal_old));
+    release_and_commit();
+    committed_rescan();
+    require(dynamic_equals(QEMU_JOURNAL_RECOVERY_FID,
+                           marker_journal_old, sizeof(marker_journal_old)),
+            "journal recovery baseline marker did not persist");
+
+    put_dynamic(QEMU_JOURNAL_RECOVERY_FID, marker_journal_new, sizeof(marker_journal_new));
+    low_flash_qemu_arm_journal_cut_after_target_erase();
+    printf("JOURNAL_RECOVERY_QEMU_ARMED\n");
+    fflush(stdout);
+    do_flash();
+    fail("journal power-cut hook returned unexpectedly");
 }
 
 static bool static_empty(uint16_t fid) {
@@ -302,6 +332,7 @@ void fido_reset_qemu_selftest(void) {
     printf("RESET_ISOLATION_QEMU_BEGIN\n");
 
     claim_phase();
+    verify_journal_recovery_or_arm_cut();
     init_openpgp();
     init_piv();
     init_fido();

@@ -18,6 +18,17 @@ config PICO_FIDO2_QEMU_RESET_SELFTEST
         test of a disposable flash image and must never be enabled in hardware
         firmware.
 
+config PICO_FIDO2_QEMU_OTA_STATE_SELFTEST
+    bool "ESP32-S3 QEMU OTA credential-state self-test"
+    default n
+    depends on PICO_FIDO2_QEMU && PICO_FIDO2_AB_OTA
+    help
+        Seed or verify one valid resident FIDO credential in part0 and print a
+        stable hash of its credential/RP records on every boot. This is a
+        QEMU-only disposable-flash test used to prove that A/B trial,
+        rollback, and confirmation transitions preserve authenticator state.
+        Never enable it in hardware firmware.
+
 config PICO_FIDO2_BLE
     bool "FIDO2 over Bluetooth LE"
     default n

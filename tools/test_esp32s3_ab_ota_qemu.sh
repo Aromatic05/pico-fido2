@@ -15,7 +15,11 @@ cleanup() {
         kill "$qemu_pid" 2>/dev/null || true
         wait "$qemu_pid" 2>/dev/null || true
     fi
-    rm -rf "$run_dir"
+    if [[ "${KEEP_AB_OTA_QEMU_ARTIFACTS:-0}" == 1 ]]; then
+        echo "ab-ota-qemu: retained $run_dir" >&2
+    else
+        rm -rf "$run_dir"
+    fi
 }
 trap cleanup EXIT
 mkdir -p "$run_dir"
@@ -46,7 +50,13 @@ build_version() {
     local build="$run_dir/build-$name"
     local sdkconfig="$run_dir/sdkconfig-$name"
     local epoch_defaults="$run_dir/epoch-$name.defaults"
-    printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$epoch" >"$epoch_defaults"
+    {
+        printf 'CONFIG_PICO_FIDO2_SECURITY_VERSION=%s\n' "$epoch"
+        printf 'CONFIG_PICO_FIDO2_QEMU_OTA_STATE_SELFTEST=y\n'
+        printf '# CONFIG_MBEDTLS_HARDWARE_SHA is not set\n'
+        printf 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="tests/partitions-secure-ota-qemu.csv"\n'
+        printf 'CONFIG_PARTITION_TABLE_FILENAME="tests/partitions-secure-ota-qemu.csv"\n'
+    } >"$epoch_defaults"
     SDKCONFIG_DEFAULTS="${defaults};${epoch_defaults}" \
         idf.py -B "$build" -DSDKCONFIG="$sdkconfig" -DPROJECT_VER="$project_version" \
         set-target esp32s3 >/dev/null
@@ -56,6 +66,8 @@ build_version() {
 
     for expected in \
         CONFIG_PICO_FIDO2_QEMU=y \
+        CONFIG_PICO_FIDO2_QEMU_OTA_STATE_SELFTEST=y \
+        '# CONFIG_MBEDTLS_HARDWARE_SHA is not set' \
         CONFIG_PICOKEYS_ESP32_DEV_KEYS=y \
         CONFIG_PICO_FIDO2_WIFI_COMMISSIONING=y \
         CONFIG_PICO_FIDO2_AB_OTA=y \
@@ -64,8 +76,8 @@ build_version() {
         CONFIG_PICO_FIDO2_SECURITY_VERSION=${epoch}; do
         grep -qx "$expected" "$sdkconfig" || fail "$name: missing config $expected"
     done
-    grep -qx 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="pico-keys-sdk/config/esp32/partitions-secure-ota.csv"' "$sdkconfig" \
-        || fail "$name: wrong A/B partition table"
+    grep -qx 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="tests/partitions-secure-ota-qemu.csv"' "$sdkconfig" \
+        || fail "$name: wrong QEMU A/B partition table"
     if grep -qx 'CONFIG_SECURE_BOOT=y' "$sdkconfig" || \
        grep -qx 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' "$sdkconfig" || \
        grep -qx 'CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y' "$sdkconfig" || \
@@ -125,6 +137,31 @@ wait_log() {
     fail "timed out waiting for $description"
 }
 
+state_record_hash() {
+    local log=$1 kind=$2
+    grep -aoE "OTA_STATE_${kind}:FID=[0-9a-f]{4}:LEN=[0-9]+:SHA256=[0-9a-f]{64}" "$log" \
+        | tail -1 | sed -E 's/.*SHA256=//'
+}
+
+assert_resident_state() {
+    local log=$1 label=$2 expected_cred=$3 expected_rp=$4 expected_root=$5
+    local mode actual_cred actual_rp actual_root
+    mode="$(grep -aoE 'OTA_STATE_CREDENTIAL_MODE:(created|existing)' "$log" | tail -1 | cut -d: -f2)"
+    actual_cred="$(state_record_hash "$log" CRED)"
+    actual_rp="$(state_record_hash "$log" RP)"
+    actual_root="$(state_record_hash "$log" ROOT)"
+    if [[ "$mode" != existing || ! "$actual_cred" =~ ^[0-9a-f]{64}$ || \
+          ! "$actual_rp" =~ ^[0-9a-f]{64}$ || ! "$actual_root" =~ ^[0-9a-f]{64}$ || \
+          "$actual_cred" != "$expected_cred" || "$actual_rp" != "$expected_rp" || \
+          "$actual_root" != "$expected_root" ]]; then
+        printf 'expected: CRED=%s RP=%s ROOT=%s\n' \
+            "$expected_cred" "$expected_rp" "$expected_root" >&2
+        grep -aoE 'OTA_STATE_[A-Z_]+:[^[:cntrl:]]*' "$log" >&2 || true
+        grep -aE 'First initialization|legacy store|journal|SCAN' "$log" >&2 || true
+        fail "$label: resident credential semantic state changed"
+    fi
+}
+
 assert_otadata() {
     local flash=$1 slot=$2 seq=$3 state=$4
     python3 - "$flash" "$slot" "$seq" "$state" <<'PY'
@@ -171,11 +208,27 @@ PY
 # First raw A/B baseline boot: blank otadata must select ota_0 and persist it VALID.
 start_qemu "$run_dir/baseline-flash.bin" "$run_dir/efuse-baseline.bin" "$run_dir/baseline.log"
 wait_log "$run_dir/baseline.log" 'App version:.*7\.4\.0' 400 'ota_0 baseline image'
+wait_log "$run_dir/baseline.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'baseline resident credential state'
+baseline_cred_hash="$(state_record_hash "$run_dir/baseline.log" CRED)"
+baseline_rp_hash="$(state_record_hash "$run_dir/baseline.log" RP)"
+baseline_root_hash="$(state_record_hash "$run_dir/baseline.log" ROOT)"
+[[ "$baseline_cred_hash" =~ ^[0-9a-f]{64}$ && "$baseline_rp_hash" =~ ^[0-9a-f]{64}$ && \
+   "$baseline_root_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid baseline resident state hashes'
 wait_log "$run_dir/baseline.log" 'main_task: Returned from app_main\(\)' 400 'baseline app_main completion'
 stop_qemu
 assert_otadata "$run_dir/baseline-flash.bin" 0 1 2
 [[ "$(sha256sum "$run_dir/efuse-baseline.bin" | awk '{print $1}')" == "$baseline_efuse_sha" ]] \
     || fail 'baseline A/B boot modified virtual eFuse state'
+
+# Control: reboot the same ota_0 image before touching otadata.  This proves
+# the resident probe itself is durably committed and separates generic reboot
+# persistence from an actual A/B slot-transition failure.
+start_qemu "$run_dir/baseline-flash.bin" "$run_dir/efuse-baseline.bin" "$run_dir/baseline-reboot.log"
+wait_log "$run_dir/baseline-reboot.log" 'App version:.*7\.4\.0' 400 'ota_0 baseline reboot image'
+wait_log "$run_dir/baseline-reboot.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'ota_0 reboot resident credential state'
+assert_resident_state "$run_dir/baseline-reboot.log" 'ota_0 same-image reboot' \
+    "$baseline_cred_hash" "$baseline_rp_hash" "$baseline_root_hash"
+stop_qemu
 
 cp "$run_dir/baseline-flash.bin" "$run_dir/rollback-flash.bin"
 cp "$run_dir/efuse-baseline.bin" "$run_dir/rollback-efuse.bin"
@@ -188,12 +241,18 @@ select_ota1_new "$run_dir/rollback-flash.bin"
 assert_otadata "$run_dir/rollback-flash.bin" 1 2 0
 start_qemu "$run_dir/rollback-flash.bin" "$run_dir/rollback-efuse.bin" "$run_dir/rollback-first.log"
 wait_log "$run_dir/rollback-first.log" 'App version:.*7\.4\.1' 400 'ota_1 trial image'
+wait_log "$run_dir/rollback-first.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'ota_1 trial resident credential state'
+assert_resident_state "$run_dir/rollback-first.log" 'ota_1 trial boot' \
+    "$baseline_cred_hash" "$baseline_rp_hash" "$baseline_root_hash"
 wait_log "$run_dir/rollback-first.log" 'OTA image pending verification; delaying confirmation for 5 seconds' 400 'PENDING_VERIFY application state'
 stop_qemu
 assert_otadata "$run_dir/rollback-flash.bin" 1 2 1
 
 start_qemu "$run_dir/rollback-flash.bin" "$run_dir/rollback-efuse.bin" "$run_dir/rollback-second.log"
 wait_log "$run_dir/rollback-second.log" 'App version:.*7\.4\.0' 400 'rollback to ota_0'
+wait_log "$run_dir/rollback-second.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'rolled-back resident credential state'
+assert_resident_state "$run_dir/rollback-second.log" 'ota_0 rollback boot' \
+    "$baseline_cred_hash" "$baseline_rp_hash" "$baseline_root_hash"
 wait_log "$run_dir/rollback-second.log" 'main_task: Returned from app_main\(\)' 400 'rolled-back app_main completion'
 stop_qemu
 assert_otadata "$run_dir/rollback-flash.bin" 0 1 2
@@ -205,12 +264,18 @@ assert_otadata "$run_dir/rollback-flash.bin" 1 2 4
 select_ota1_new "$run_dir/confirm-flash.bin"
 start_qemu "$run_dir/confirm-flash.bin" "$run_dir/confirm-efuse.bin" "$run_dir/confirm-first.log"
 wait_log "$run_dir/confirm-first.log" 'App version:.*7\.4\.1' 400 'ota_1 confirmation image'
+wait_log "$run_dir/confirm-first.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'ota_1 confirmation resident credential state'
+assert_resident_state "$run_dir/confirm-first.log" 'ota_1 confirmation boot' \
+    "$baseline_cred_hash" "$baseline_rp_hash" "$baseline_root_hash"
 wait_log "$run_dir/confirm-first.log" 'OTA image confirmed after service-loop stability window' 220 'five-second OTA confirmation'
 stop_qemu
 assert_otadata "$run_dir/confirm-flash.bin" 1 2 2
 
 start_qemu "$run_dir/confirm-flash.bin" "$run_dir/confirm-efuse.bin" "$run_dir/confirm-second.log"
 wait_log "$run_dir/confirm-second.log" 'App version:.*7\.4\.1' 400 'confirmed ota_1 reboot'
+wait_log "$run_dir/confirm-second.log" 'OTA_STATE_CREDENTIAL_SHA256:[0-9a-f]{64}' 400 'confirmed resident credential state'
+assert_resident_state "$run_dir/confirm-second.log" 'confirmed ota_1 reboot' \
+    "$baseline_cred_hash" "$baseline_rp_hash" "$baseline_root_hash"
 wait_log "$run_dir/confirm-second.log" 'main_task: Returned from app_main\(\)' 400 'confirmed app_main completion'
 stop_qemu
 assert_otadata "$run_dir/confirm-flash.bin" 1 2 2
@@ -222,5 +287,6 @@ printf 'blank otadata -> ota_0 VALID: PASS\n'
 printf 'ota_1 NEW -> PENDING_VERIFY: PASS\n'
 printf 'unconfirmed ota_1 -> ABORTED -> ota_0 rollback: PASS\n'
 printf 'confirmed ota_1 -> VALID -> ota_1 reboot: PASS\n'
+printf 'resident credential survives trial/rollback/confirm: PASS (%s)\n' "$baseline_cred_hash"
 printf 'virtual eFuse unchanged: %s\n' "$baseline_efuse_sha"
 printf 'No physical device was accessed.\n'

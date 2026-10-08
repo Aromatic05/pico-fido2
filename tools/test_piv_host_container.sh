@@ -17,7 +17,10 @@ if ! "$runtime" image exists "$image" >/dev/null 2>&1; then
         -t "$image" pico-openpgp
 fi
 
-"$runtime" run --rm -i --network none -v "$PWD:/src:ro" "$image" bash -s <<'INNER'
+"$runtime" run --rm -i --network none -v "$PWD:/src:ro" \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_NTH \
+    "$image" bash -s <<'INNER'
 set -euo pipefail
 mkdir -p /work/build /work/run /work/tests
 cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
@@ -97,6 +100,31 @@ _, sw1, sw2 = conn.transmit([0x00, 0x20, 0x00, 0x80])
 assert sw1 == 0x63 and (sw2 & 0xF0) == 0xC0, f'PIV PIN auth survived reset: {sw1:02x}{sw2:02x}'
 print(f'vpcd warm reset preserves PIV selection and clears PIN auth: PASS ({sw1:02x}{sw2:02x})')
 PYRESET
+stop_emulator
+
+start_emulator
+cd /work
+yubico-piv-tool -r "Virtual PCD 00 00" -agenerate -s9c -AECCP256 -opublic.pem >/work/pin-change-generate.log 2>&1
+yubico-piv-tool -r "Virtual PCD 00 00" -averify-pin -P123456 -arequest -s9c \
+    -S'/CN=pin-change/OU=test/O=example.com/' -ipublic.pem -ocert.pem \
+    >/work/pin-change-request.log 2>&1
+yubico-piv-tool -r "Virtual PCD 00 00" -averify-pin -P123456 -aselfsign -s9c \
+    -S'/CN=pin-change/OU=test/O=example.com/' -ipublic.pem -ocert.pem \
+    >/work/pin-change-selfsign.log 2>&1
+yubico-piv-tool -r "Virtual PCD 00 00" -achange-pin -P123456 -N654321 \
+    >/work/pin-change-change.log 2>&1
+set +e
+yubico-piv-tool -r "Virtual PCD 00 00" -averify-pin -P654321 -atest-signature -s9c \
+    -icert.pem >/work/pin-change-sign.log 2>&1
+pin_change_rc=$?
+set -e
+if [[ "$pin_change_rc" -ne 0 ]] || ! grep -q 'Successful' /work/pin-change-sign.log; then
+    cat /work/pin-change-change.log >&2
+    cat /work/pin-change-sign.log >&2
+    echo 'PIV PIN change made an existing private key unusable' >&2
+    exit 1
+fi
+printf 'PIV PIN change preserves existing private-key usability: PASS\n'
 stop_emulator
 
 start_emulator

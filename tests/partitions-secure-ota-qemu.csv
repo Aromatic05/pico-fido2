@@ -1,0 +1,13 @@
+# QEMU-only logical twin of the secure A/B layout.
+# Offsets and sizes must stay identical to the production table, but encrypted
+# flags are omitted because this state-machine test deliberately runs without
+# Flash Encryption/eFuse provisioning. Using an encrypted partition while
+# flash encryption is disabled routes writes through esp_flash_write_encrypted
+# and does not model durable production part0 semantics across reboot.
+# Name,   Type, SubType, Offset,   Size,      Flags
+nvs,      data, nvs,     0x11000,  0x6000,
+phy_init, data, phy,     0x17000,  0x1000,
+otadata,  data, ota,     0x18000,  0x2000,
+ota_0,    app,  ota_0,   0x20000,  0x170000,
+ota_1,    app,  ota_1,   0x190000, 0x170000,
+part0,    0x40, 0x1,     0x300000, 1M,

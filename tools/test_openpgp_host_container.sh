@@ -27,7 +27,10 @@ fi
 
 "$runtime" run --rm -i --network none -v "$PWD:/src:ro" \
     -v "$host_eddsa_dir:/src/pico-keys-sdk/mbedtls:ro" \
-    -e OPENPGP_PYTEST_TARGET="$pytest_target" "$image" bash -s <<'INNER'
+    -e OPENPGP_PYTEST_TARGET="$pytest_target" \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE \
+    -e PICO_KEYS_EMU_FAIL_FILE_PUT_NTH \
+    "$image" bash -s <<'INNER'
 set -euo pipefail
 mkdir -p /work/build /work/run /work/pytest-cache
 cmake -S /src -B /work/build -DENABLE_EMULATION=1 -DENABLE_EDDSA=1 -DCMAKE_BUILD_TYPE=Release >/work/cmake.log
