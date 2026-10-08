@@ -324,8 +324,17 @@ def run_smoke(binary: Path) -> None:
                 hid_oath_list(hid, assigned_cid)
 
             application_data = openpgp_get_data(ccid, 0x006E, interleave=interleave_hid)
-            if not application_data.startswith(b"\x4f"):
-                raise RuntimeError("unexpected OpenPGP application-related data")
+            # OpenPGP GET DATA 6E returns the complete constructed TLV,
+            # including the nested 4F/AID. Earlier versions incorrectly
+            # stripped the outer 6E tag and the original smoke test assumed it.
+            if (
+                len(application_data) < 22
+                or application_data[:2] != b"\x6e\x82"
+                or int.from_bytes(application_data[2:4], "big") != len(application_data) - 4
+                or application_data[4:6] != b"\x4f\x10"
+                or application_data[6:12] != bytes.fromhex("D27600012401")
+            ):
+                raise RuntimeError("OpenPGP 6E constructed TLV or AID malformed")
             print(f"OpenPGP GET RESPONSE survives HID CTAP2/OATH: PASS ({len(application_data)} bytes)")
 
             # OATH access-code authentication belongs to the transport session.

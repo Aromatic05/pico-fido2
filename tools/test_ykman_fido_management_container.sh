@@ -63,6 +63,21 @@ from fido2.hid import CtapHidDevice
 from yubikit.core import TRANSPORT
 from yubikit.management import CAPABILITY, DeviceConfig, ManagementSession
 
+# Device policy must not depend on the current pinUvAuthToken/session status.
+from fido2.ctap2 import Ctap2, ClientPin
+
+uv_dev = next(CtapHidDevice.list_devices())
+uv_ctap = Ctap2(uv_dev)
+assert uv_ctap.get_info().options["alwaysUv"] is False
+uv_pin = ClientPin(uv_ctap)
+uv_pin.set_pin("AromaticTestPin42")
+assert uv_ctap.get_info().options["clientPin"] is True
+assert uv_ctap.get_info().options["alwaysUv"] is False
+uv_pin.get_pin_token("AromaticTestPin42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT)
+assert uv_ctap.get_info().options["alwaysUv"] is False
+uv_dev.close()
+print("GetInfo alwaysUv independent of transient PIN verification: PASS")
+
 CCID_APPS = CAPABILITY.OATH | CAPABILITY.PIV | CAPABILITY.OPENPGP
 
 def open_session():
