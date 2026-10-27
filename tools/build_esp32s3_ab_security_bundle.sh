@@ -38,6 +38,8 @@ printf 'CONFIG_SECURE_BOOT_SIGNING_KEY="%s/secure_boot_signing_key.pem"\n' "$pro
 build_defaults="${defaults};${maintenance_defaults};${signing_defaults};${version_defaults}"
 
 SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" set-target esp32s3 >/dev/null
+grep -qx '# CONFIG_MBEDTLS_HARDWARE_AES is not set' "$sdkconfig" \
+    || fail 'PIV AES-192 requires mbedTLS software AES on ESP32-S3'
 SDKCONFIG_DEFAULTS="$build_defaults" idf.py -B "$build_dir" -DSDKCONFIG="$sdkconfig" build >/dev/null
 
 for expected in \
