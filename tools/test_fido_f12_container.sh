@@ -43,12 +43,43 @@ if [ "$F12_SCOPE" = "probe" ]; then
   rm -f memory.flash
   phase pin-make
 fi
-if [ "$F12_SCOPE" != "pin" ] && [ "$F12_SCOPE" != "probe" ]; then
+if [ "$F12_SCOPE" = "attestation-profile" ]; then
+  rm -f memory.flash
+  /work/build/pico_fido2 >emulator.log 2>&1 &
+  emu_pid=$!
+  sleep 1
+  kill -0 "$emu_pid" || { cat emulator.log; exit 1; }
+  timeout 190s python3 -u /src/tests/host_fido_f12_attestation_profile.py
+  kill "$emu_pid" 2>/dev/null || true
+  wait "$emu_pid" 2>/dev/null || true
+  emu_pid=""
+  sleep 1
+fi
+if [ "$F12_SCOPE" = "full-driver" ]; then
+  rm -f memory.flash
+  for stage in fill after-restart; do
+    /work/build/pico_fido2 >emulator.log 2>&1 &
+    emu_pid=$!
+    sleep 1
+    kill -0 "$emu_pid" || { cat emulator.log; exit 1; }
+    echo "F12_VIRTUAL_FULL_DRIVER_STAGE=$stage"
+    if ! timeout 620s python3 -u /src/tests/host_fido_f12_full_driver.py "$stage" >"driver-$stage.log" 2>&1; then
+      tail -n 100 "driver-$stage.log"
+      exit 1
+    fi
+    tail -n 8 "driver-$stage.log"
+    kill "$emu_pid" 2>/dev/null || true
+    wait "$emu_pid" 2>/dev/null || true
+    emu_pid=""
+    sleep 1
+  done
+fi
+if [ "$F12_SCOPE" != "pin" ] && [ "$F12_SCOPE" != "probe" ] && [ "$F12_SCOPE" != "attestation-profile" ] && [ "$F12_SCOPE" != "full-driver" ]; then
   rm -f memory.flash
   phase fill
   phase check-full
 fi
-if [ "$F12_SCOPE" != "capacity" ] && [ "$F12_SCOPE" != "probe" ]; then
+if [ "$F12_SCOPE" != "capacity" ] && [ "$F12_SCOPE" != "probe" ] && [ "$F12_SCOPE" != "attestation-profile" ] && [ "$F12_SCOPE" != "full-driver" ]; then
   rm -f memory.flash
   phase pin-softlock
   phase pin-unlock
@@ -62,6 +93,8 @@ case "$F12_SCOPE" in
   capacity) echo "F12_256_RESIDENT_FULL_CAPACITY_REAL_SOURCE_EMULATION: PASS" ;;
   pin) echo "F12_PIN_LOCKOUT_AND_RECOVERY_REAL_SOURCE_EMULATION: PASS" ;;
   probe) echo "F12_FRESH_CARD_PIN_AUTHENTICATED_REGISTER_REAL_SOURCE_EMULATION: PASS" ;;
+  attestation-profile) echo "F12_EXACT_PHYSICAL_REGISTRATION_PROFILE_VIRTUAL_FLASH: PASS" ;;
+  full-driver) echo "F12_ONE_COMMAND_CAPACITY_DRIVER_SOFTWARE_CARD_FLOW: PASS (virtual UP; no physical USB)" ;;
   all) echo "F12_256_CAPACITY_AND_PIN_LIFECYCLE_REAL_SOURCE_EMULATION: PASS" ;;
   *) echo "F12 invalid test scope: $F12_SCOPE" >&2; exit 2 ;;
 esac
