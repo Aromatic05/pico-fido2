@@ -6,7 +6,9 @@ cd "$ROOT"
 
 python tests/formal_state_model.py
 python tests/button_press_model.py
+python tests/led_state_machine_model.py
 python tests/sdkconfig_contracts.py
+python tests/dev_ota_client_test.py
 git diff --check
 
 cmake -S . -B build-host -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Debug
@@ -77,6 +79,13 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o build-host-asan/wifi_captive_dns_test
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
     build-host-asan/wifi_captive_dns_test
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I src/fido2 tests/wifi_ota_policy_test.c src/fido2/wifi_ota_policy.c \
+    -o build-host-asan/wifi_ota_policy_test
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    build-host-asan/wifi_ota_policy_test
 
 cmake -S . -B build-host-tsan \
     -DENABLE_EMULATION=1 \

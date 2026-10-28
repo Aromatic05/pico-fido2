@@ -36,12 +36,9 @@ def select_device(serial: str | None) -> CtapHidDevice:
     return candidates[0]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--serial", help="select one 1050:0407 device by USB serial")
-    args = parser.parse_args()
-
-    dev = select_device(args.serial)
+def request_maintenance(serial: str | None = None) -> str | None:
+    dev = select_device(serial)
+    resolved_serial = dev.descriptor.serial_number
     try:
         payload = bytes([VENDOR_MAINTENANCE]) + cbor.encode({1: SUBCOMMAND_OPEN})
         response = dev.call(CTAPHID_VENDOR_CBOR, payload)
@@ -55,6 +52,15 @@ def main() -> None:
     result = cbor.decode(response[1:])
     if result != {1: True}:
         raise SystemExit(f"unexpected maintenance response: {result!r}")
+    return resolved_serial
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--serial", help="select one 1050:0407 device by USB serial")
+    args = parser.parse_args()
+
+    request_maintenance(args.serial)
     print("development maintenance requested over USB")
 
 
