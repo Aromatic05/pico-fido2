@@ -8,6 +8,16 @@ config PICO_FIDO2_QEMU
         Disable hardware USB driver/polling when running under Espressif QEMU.
         Protocol transports are exercised by native host emulation instead.
 
+config PICO_FIDO2_QEMU_RESET_SELFTEST
+    bool "ESP32-S3 QEMU reset-isolation self-test"
+    default n
+    depends on PICO_FIDO2_QEMU
+    help
+        Exercise applet-local and whole-device reset semantics against the
+        actual ESP32-S3 PicoKeys flash backend. This is a QEMU-only destructive
+        test of a disposable flash image and must never be enabled in hardware
+        firmware.
+
 config PICO_FIDO2_BLE
     bool "FIDO2 over Bluetooth LE"
     default n

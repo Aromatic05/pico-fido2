@@ -1,6 +1,6 @@
 #include "sdkconfig.h"
 
-#if CONFIG_PICO_FIDO2_BLE || CONFIG_PICO_FIDO2_WIFI_COMMISSIONING || CONFIG_PICO_FIDO2_AB_OTA
+#if CONFIG_PICO_FIDO2_BLE || CONFIG_PICO_FIDO2_WIFI_COMMISSIONING || CONFIG_PICO_FIDO2_AB_OTA || CONFIG_PICO_FIDO2_QEMU_RESET_SELFTEST
 
 #include "esp_err.h"
 #include "nvs_flash.h"
@@ -11,6 +11,9 @@ void fido_wifi_init(void);
 void fido_wifi_task(void);
 #if CONFIG_PICO_FIDO2_AB_OTA
 #include "wifi_ota.h"
+#endif
+#if CONFIG_PICO_FIDO2_QEMU_RESET_SELFTEST
+void fido_reset_qemu_selftest_task(void);
 #endif
 
 static void transport_nvs_init(void) {
@@ -33,6 +36,9 @@ void picokey_extra_transport_init(void) {
 }
 
 void picokey_extra_transport_task(void) {
+#if CONFIG_PICO_FIDO2_QEMU_RESET_SELFTEST
+    fido_reset_qemu_selftest_task();
+#endif
 #if CONFIG_PICO_FIDO2_BLE
     fido_ble_task();
 #endif
