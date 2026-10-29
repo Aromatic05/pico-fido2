@@ -1,6 +1,7 @@
 # Build directories
 build/
 build_release/
+build-*/
 
 # CMake
 CMakeCache.txt
@@ -37,8 +38,40 @@ release/
 # Compile commands
 compile_commands.json
 
+# Python test artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local virtual environments and tool output
+.venv/
+venv/
+.tox/
+*.log
+
+# Private provisioning, device backups, HIL workspaces and test evidence.
+# These directories may contain physical-device keys, PINs and flash dumps.
+/baseline/
+/var/
+secure_boot_signing_key.pem
+
+# Machine-local environment variables and provisioning overrides.
+.env
+.env.*
+!.env.example
+!.env.template
+
 # ESP-IDF
 sdkconfig
 sdkconfig.old
+sdkconfig.*
+!sdkconfig.*.defaults
+!sdkconfig.defaults
 managed_components/
 dependencies.lock
