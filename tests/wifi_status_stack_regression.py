@@ -2,7 +2,7 @@
 """Verify the actual ESP32-S3 HTTP status handler leaves room on the task stack.
 
 Run after idf.py build, using the compiled wifi_commission.c.obj, not source
-estimates.  This catches accidental return of the multi-KiB HIL response
+estimates.  This catches accidental return of the multi-KiB status response
 buffer to the 8-KiB HTTP task stack.
 """
 
@@ -21,7 +21,7 @@ SOURCE = ROOT / "src/fido2/wifi_commission.c"
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--object", type=Path, required=True,
-                        help="ESP-IDF wifi_commission.c.obj produced by the diagnostic build")
+                        help="ESP-IDF wifi_commission.c.obj produced by the firmware build")
     args = parser.parse_args()
 
     source = SOURCE.read_text()

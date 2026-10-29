@@ -9,6 +9,19 @@ python tests/button_press_model.py
 python tests/led_state_machine_model.py
 python tests/sdkconfig_contracts.py
 python tests/dev_ota_client_test.py
+python tests/dev_ota_recovery_regression.py
+python tests/esp32s3_provision_preflight_test.py
+python tests/esp32s3_update_tool_test.py
+python tests/ble_bootstrap_regression.py
+python tests/ble_contention_regression.py
+python tests/ccid_busy_retry_regression.py
+python tests/ccid_transport_regression.py
+python tests/hid_foreign_owner_frames_regression.py
+python tests/hid_init_channel_regression.py
+python tests/hid_tx_ack_interleaving_regression.py
+python tests/hid_tx_completion_regression.py
+python tests/rng_transport_regression.py
+python tests/fido_capacity_recovery_regression.py
 git diff --check
 
 cmake -S . -B build-host -DENABLE_EMULATION=1 -DCMAKE_BUILD_TYPE=Debug
@@ -130,4 +143,4 @@ fi
 # +9 dBm. A plain idf.py reconfigure preserves stale sdkconfig choices.
 ./tools/esp32s3_bringup.sh build
 
-echo "transport ownership software gate: PASS"
+echo "software tests: PASS"

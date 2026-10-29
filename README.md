@@ -1,190 +1,79 @@
 # Pico FIDO2
 
-This project transforms your Raspberry RP235x or ESP32 microcontroller into an integrated FIDO Passkey **and** OpenPGP smartcard, functioning like a standard USB Passkey for authentication and as a smartcard for cryptographic operations.
+FIDO2/U2F、OpenPGP、PIV、OATH、OTP 与 HSM Auth 固件，支持 Raspberry Pi Pico 和 ESP32-S3。该项目基于 Pico FIDO2 社区版。
 
-This is a fork of the last community edition version of the pico-fido2 firmware, from December 9th 2025, that was available on https://github.com/polhenarejos/pico-fido2 before that repository was deleted and replaced by something else.
+Aromatic Key 的按钮、LED、蓝牙和维护页面操作见 [使用说明](docs/Aromatic-Key-User-Guide.zh-CN.md)。
 
----
+## 获取源码
 
-## Supported platforms
-
-| | RP2040 | RP2350 | ESP32-S2 | ESP32-S3 |
-|---|---|---|---|---|
-| CPU | 2x Cortex-M0+ | 2x Cortex-M33 | 1x Xtensa | 2x Xtensa |
-| Core pinning | Yes  | Yes | No  | Yes |
-| RTOS | No (Pico SDK) | No (Pico SDK) | FreeRTOS | FreeRTOS |
-| MCU ID | `0` | `1` | `2` | `2` |
-
-### Security
-
-Currently most secure features are supported and implemented only for RP2350.
-
-| | RP2350 | RP2040 | ESP32-S2 | ESP32-S3 |
-|---|---|---|---|---|
-| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | No (`// TODO`) |
-| Secure Lock | Yes (key invalidation, page locking) | No | No | No |
-| MKEK in OTP/eFuse | Yes (OTP rows with ECC, chaff, page locking) | No (plaintext flash) | Yes (eFuse `BLK_KEY3`, write-locked) | Yes (eFuse `BLK_KEY3`, write-locked) |
-| Device key in OTP/eFuse | Yes (OTP + chaff + migration) | No | Yes (eFuse `BLK_KEY4`) | Yes (eFuse `BLK_KEY4`) |
-| `cmd_secure` APDU | Available | Not available | Available | Available |
-| Firmware signing | Yes (`pico_sign_binary`) | No | No | No |
-| Rollback protection | Yes | No | No | No |
-| HW crypto | SHA-256	| No | SHA-256 + AES-GCM + ECDSA/ECDH | SHA-256 + AES-GCM + ECDSA/ECDH |
-
-## Features
-
-Pico FIDO2 includes the following features:
-
-### FIDO2 / U2F / WebAuthn
-
-- CTAP 2.1 / CTAP 1
-- WebAuthn
-- U2F
-- HMAC-Secret extension
-- CredProtect extension
-- User presence enforcement through physical button
-- User verification with PIN
-- Discoverable credentials (resident keys)
-- Credential management
-- ECDSA and EDDSA authentication
-- Support for SECP256R1, SECP384R1, SECP521R1, SECP256K1 and Ed25519 curves
-- App registration and login
-- Device selection
-- Support for vendor configuration
-- Backup with 24 words
-- Secure lock to protect the device from flash dumps
-- Permissions support (MC, GA, CM, ACFG, LBW)
-- Authenticator configuration
-- minPinLength extension
-- Self attestation
-- Enterprise attestation
-- credBlobs extension
-- largeBlobKey extension
-- Large blobs support (2048 bytes max)
-- OATH (based on YKOATH protocol specification)
-- TOTP / HOTP
-- Yubikey One Time Password
-- Challenge-response generation
-- Emulated keyboard interface
-- Button press generates an OTP that is directly typed
-- Yubico YKMAN compatible
-- Nitrokey nitropy and nitroapp compatible
-- Secure Boot and Secure Lock in RP2350 and ESP32-S3 MCUs
-- One Time Programming to store the master key that encrypts all resident keys and seeds.
-- Rescue interface to allow recovery of the device if it becomes unresponsive or undetectable.
-- LED customization with Pico Commissioner.
-
-### OpenPGP Smartcard
-
-- OpenPGP card specification v3.4
-- 3 key slots (Signature, Encryption, Authentication)
-- RSA (2048, 3072, 4096), Ed25519, Curve25519, ECDSA (NIST P-256, P-384, P-521)
-- Key generation on device
-- Key import/export
-- PIN and Admin PIN protection
-- Reset and Unblock functions
-- Works with GnuPG, SSH, S/MIME, and compatible tools
-- CCID over USB
-- Compatible with major OS (Linux, Windows, macOS)
-- Touch button for user presence confirmation (optional)
-- Open source
-
----
-
-## Security Considerations
-
-Microcontrollers RP2350 and ESP32-S3 are designed to support secure environments when Secure Boot is enabled, and optionally, Secure Lock. These features allow a master key encryption key (MKEK) to be stored in a one-time programmable (OTP) memory region, which is inaccessible from outside secure code. This master key is then used to encrypt all private and secret keys on the device, protecting sensitive data from potential flash memory dumps.
-
-**However**, the RP2040 microcontroller lacks this level of security hardware, meaning that it cannot provide the same protection. Data stored on its flash memory, including private or master keys, can be easily accessed or dumped, as encryption of the master key itself is not feasible. Consequently, if an RP2040 device is stolen, any stored private or secret keys may be exposed.
-
----
-
-## Build for Raspberry Pico
-
-Before building, ensure you have installed the toolchain for the Pico and that the Pico SDK is properly located on your drive.
-
-```
-git clone https://github.com/youruser/pico-fido2
+```sh
 git submodule update --init --recursive
-cd pico-fido2
-mkdir build
-cd build
-PICO_SDK_PATH=/path/to/pico-sdk cmake .. -DPICO_BOARD=board_type -DUSB_VID=0x1D50 -DUSB_PID=0x619B
-make
 ```
 
-Note that `PICO_BOARD`, `USB_VID` and `USB_PID` are optional. If not provided, `pico` board and VID/PID `1D50:619B` will be used.
+## Raspberry Pi Pico
 
-Additionally, you can pass the `VIDPID=value` parameter to build the firmware with a known VID/PID. The supported values are:
+安装 Pico SDK 和 ARM 工具链，设置 `PICO_SDK_PATH`：
 
-- `NitroHSM`
-- `NitroFIDO2`
-- `NitroStart`
-- `NitroPro`
-- `Nitro3`
-- `Yubikey5`
-- `YubikeyNeo`
-- `YubiHSM`
-- `Gnuk`
-- `GnuPG`
-
-You can use whatever VID/PID for your own personal use. **But remember that you are not authorized to distribute the binary with a VID/PID that you do not own.**
-The VID/PID `1D50:619B` is provided to the project by [OpenMoko](https://wiki.openmoko.org/wiki/USB_Product_IDs). It can only be used for builds distributed under a free and open source license.
-
-After running `make`, the binary file `pico_fido2.uf2` will be generated. To load this onto your Pico board:
-
-1. Put the Pico board into loading mode by holding the `BOOTSEL` button while plugging it in.
-2. Copy the `pico_fido2.uf2` file to the new USB mass storage device that appears.
-3. Once the file is copied, the Pico mass storage device will automatically disconnect, and the Pico board will reset with the new firmware.
-4. A blinking LED will indicate that the device is ready to work.
-
-To configure your device you can use the [picoforge desktop application ](https://github.com/librekeys/picoforge).
-
-## Build for ESP32
-
-Replace
-- `ESP_PRODUCT` with your SoC's name: e.g. `esp32s2` or `esp32s3`
-- `ESP_NAME` with it's full name: `ESP32-S2` or `ESP32-S3`
-
-Install ESP-IDF and toolchain
-
-```bash
-git clone --recursive https://github.com/espressif/esp-idf.git -b v5.5 --depth=1
-cd esp-idf
-./install.sh ESP_PRODUCT
-. ./export.sh
-cd ..
+```sh
+cmake -S . -B build -DPICO_BOARD=pico
+cmake --build build -j2
 ```
 
-Then, you can build with:
-```bash
-idf.py set-target ESP_PRODUCT
-idf.py all
-cd build
-esptool.py --chip ESP_NAME merge_bin -o pico_fido_esp32.bin @flash_args
+按住 BOOTSEL 接入 USB，将 `build/pico_fido2.uf2` 复制到设备。
+
+## ESP32-S3
+
+使用 ESP-IDF v5.5，先激活其 `export.sh`，再准备 Ed25519 后端：
+
+```sh
+./tools/prepare_esp32s3_ed25519.sh
+./tools/esp32s3_bringup.sh build
 ```
 
-The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
+可逆 bring-up 使用开发根密钥，只适用于开发。生产设备使用主机生成的 provisioning material、安全启动、Flash Encryption 和签名镜像。根密钥与 provisioning material 必须在仓库外保存。
 
-1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
-2. For Windows users, install drivers with [this guide](https://github.com/espressif/esp-win-usb-drivers#documentation)
-3. Go to https://espressif.github.io/esptool-js/
-4. Click on Connect and choose the board
-5. Choose the `pico_fido_esp32.bin` file
-6. Set Flash Address=0x0000
-7. Click Program
-8. Press RST/Reset button on the board. A blinking LED will indicate that the device is ready to work.
+已完成 provisioning 的 A/B 设备可构建签名 OTA：
 
-To configure your device you can use the [picoforge desktop application ](https://github.com/librekeys/picoforge).
+```sh
+./tools/build_esp32s3_ab_ota_update_bundle.sh /private/provisioning build-ab-ota-update 1.0.0 0 production
+```
 
+最后两个参数分别是安全版本和维护配置；`production` 使用物理按钮进入维护。开发配置 `development` 允许 USB 开启维护且绕过页面授权检查。安全版本必须不低于设备 eFuse floor。
 
-## Drivers
+在维护页面安装生成的签名应用镜像。开发设备也可使用 `tools/dev_ota.py`；先通过系统网络设置连接维护热点，再运行：
 
-Pico FIDO2 uses the `HID` driver for FIDO and `CCID` for OpenPGP, both present in all major operating systems. It should be detected by all OS and browser/applications just like normal USB FIDO keys and smartcards.
+```sh
+./tools/dev_ota.py build-ab-ota-update/pico_fido2-ota-signed.bin --serial <device-serial>
+```
 
-## License
+`tools/esp32s3_provision.py` 和 `tools/esp32s3_update.py` 的 `--help` 列出主机 provisioning、只读 preflight、ROM 更新和回读参数。烧写 eFuse 不可逆；设备身份、当前 floor 和目标配置由命令参数显式指定。
 
-This project is released under the GNU Affero General Public License v3 (AGPLv3).
-A copy of the AGPLv3 license is available in the `LICENSE` file.
+## 软件验证
 
-## Credits
-This project uses libraries and portion of code from other projects that are detailed in the `LICENSE` file.
+Host 构建需要 C/C++ 工具链、CMake、Mbed TLS 依赖和相应 Python 协议库。启用 EdDSA 的 Host 测试通过 `tools/prepare_host_eddsa_mbedtls.sh` 准备临时补丁副本。
+
+```sh
+./tools/test_software.sh
+./tools/test_fido_host_container.sh
+./tools/test_piv_host_container.sh
+./tools/test_openpgp_host_container.sh
+```
+
+软件入口包含实际协议、传输、持久化和故障注入测试；独立状态模型只用于设计约束。ESP32-S3 QEMU 测试入口为 `tools/test_esp32s3_*_qemu.sh`，使用一次性虚拟 Flash/eFuse。
+
+## 实体测试
+
+仅在持有授权、使用可丢弃测试凭据时运行。测试可能修改 PIN、创建或删除凭据、耗尽重试次数或执行 applet reset；先查看对应入口参数并准备恢复状态。运行输出、私密 checkpoint 和验收记录放在仓库外。
+
+```sh
+./tools/test_hil_fido_capacity.sh --pin-file /private/test-pin.txt --journal /private/hil/capacity.json --evidence-dir /private/hil
+./tools/test_hil_fido_pin.sh change --action seed --state-dir /private/test-state --evidence-dir /private/hil
+PYTHONPATH=tests python3 -m hil.piv keys --help
+PYTHONPATH=tests python3 -m hil.openpgp keys --help
+```
+
+`hil.applet_inventory` 建立基线，`hil.applet_sentinels` 准备并验证 sibling applet；`hil.applet_reset` 提供各 applet 的 reset/恢复用例。FIDO 容量用例保留 journal、256/257 边界、真实 USB 重插、身份和公钥比较、独立验签、删除与补充注册。
+
+## 许可证
+
+许可证及各依赖的授权见仓库内 LICENSE 和子模块声明。USB VID/PID 的发布使用需获得所有者授权。

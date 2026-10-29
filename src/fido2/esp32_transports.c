@@ -74,6 +74,8 @@ static void ble_fido_bootstrap(void) {
 #endif
 
 void picokey_extra_transport_init(void) {
+    phy_data.up_btn = CONFIG_PICO_FIDO2_USER_PRESENCE_TIMEOUT_SEC;
+    phy_data.up_btn_present = true;
     transport_nvs_init();
 #if CONFIG_PICO_FIDO2_BLE
     fido_ble_init();

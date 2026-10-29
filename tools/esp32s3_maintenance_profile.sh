@@ -8,27 +8,17 @@ prepare_maintenance_profile_defaults() {
             printf '%s\n' 'sdkconfig.development-maintenance.defaults'
             ;;
         production)
-            local password_file="${PICO_FIDO2_WIFI_PASSWORD_FILE:-}"
-            [[ -n "$password_file" && -f "$password_file" ]] || {
-                echo 'production maintenance requires PICO_FIDO2_WIFI_PASSWORD_FILE' >&2
-                return 1
-            }
-            local password
-            password="$(tr -d '\r\n' <"$password_file")"
-            (( ${#password} >= 8 && ${#password} <= 63 )) || {
-                echo 'production Wi-Fi password must be 8..63 characters' >&2
-                return 1
-            }
-            [[ "$password" =~ ^[A-Za-z0-9._+-]+$ ]] || {
-                echo 'production Wi-Fi password must use portable [A-Za-z0-9._+-] characters' >&2
-                return 1
-            }
             local defaults="$out_dir/.production-maintenance.defaults"
             umask 077
             {
                 printf '# CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN is not set\n'
                 printf '# CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA is not set\n'
-                printf 'CONFIG_PICO_FIDO2_WIFI_PASSWORD="%s"\n' "$password"
+                # Select the Kconfig destination, not the derived ENABLE
+                # symbol. Never expose authenticator RAM through UART.
+                printf '# CONFIG_ESP_COREDUMP_ENABLE_TO_UART is not set\n'
+                printf 'CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y\n'
+                printf 'CONFIG_PICO_FIDO2_WIFI_SSID_PREFIX="Aromatic-Key"\n'
+                printf 'CONFIG_PICO_FIDO2_WIFI_PASSWORD="Aromatic-Key"\n'
                 printf 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=600\n'
             } >"$defaults"
             printf '%s\n' "$defaults"
@@ -45,13 +35,21 @@ assert_maintenance_profile() {
     local profile="$2"
     case "$profile" in
         development)
-            grep -qx 'CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y' "$sdkconfig"
-            grep -qx 'CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA=y' "$sdkconfig"
+            grep -qx 'CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN=y' "$sdkconfig" || return 1
+            grep -qx 'CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA=y' "$sdkconfig" || return 1
             ;;
         production)
-            grep -qx '# CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN is not set' "$sdkconfig"
-            grep -qx '# CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA is not set' "$sdkconfig"
-            grep -qx 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=600' "$sdkconfig"
+            grep -qx '# CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN is not set' "$sdkconfig" || return 1
+            # Kconfig omits this symbol entirely when its development-mode
+            # dependency is disabled, rather than writing an explicit '#'.
+            if grep -qx 'CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA=y' "$sdkconfig"; then
+                return 1
+            fi
+            grep -qx 'CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y' "$sdkconfig" || return 1
+            grep -qx '# CONFIG_ESP_COREDUMP_ENABLE_TO_UART is not set' "$sdkconfig" || return 1
+            grep -Fqx 'CONFIG_PICO_FIDO2_WIFI_SSID_PREFIX="Aromatic-Key"' "$sdkconfig" || return 1
+            grep -Fqx 'CONFIG_PICO_FIDO2_WIFI_PASSWORD="Aromatic-Key"' "$sdkconfig" || return 1
+            grep -qx 'CONFIG_PICO_FIDO2_WIFI_IDLE_TIMEOUT_SEC=600' "$sdkconfig" || return 1
             ;;
         *)
             return 1
