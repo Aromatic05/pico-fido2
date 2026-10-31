@@ -35,6 +35,8 @@ if(ESP_PLATFORM)
          REGEX "MBEDTLS_OID_ED25519")
     file(STRINGS "${_aromatic_idf_mbedtls}/mbedtls/library/pk_internal.h" _aromatic_ed25519_rfc8410
          REGEX "MBEDTLS_ECP_DP_ED25519")
+    file(STRINGS "${_aromatic_idf_mbedtls}/mbedtls/library/x509_create.c" _aromatic_x509_alloc_fix
+         REGEX "return MBEDTLS_ERR_X509_ALLOC_FAILED;")
     if(NOT _aromatic_eddsa_kconfig OR
        NOT _aromatic_ed25519_oid OR
        NOT _aromatic_ed25519_rfc8410)
@@ -45,6 +47,12 @@ if(ESP_PLATFORM)
     unset(_aromatic_eddsa_kconfig)
     unset(_aromatic_ed25519_oid)
     unset(_aromatic_ed25519_rfc8410)
+    if(NOT _aromatic_x509_alloc_fix)
+        message(FATAL_ERROR
+            "Mbed TLS CVE-2026-34874 allocation fix is missing. "
+            "Run ${CMAKE_CURRENT_LIST_DIR}/tools/prepare_esp32s3_ed25519.sh first.")
+    endif()
+    unset(_aromatic_x509_alloc_fix)
     unset(_aromatic_idf_mbedtls)
 
     set(EXTRA_COMPONENT_DIRS

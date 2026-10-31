@@ -13,3 +13,5 @@ Pinned bases:
 `mbedtls-component-ed25519.patch` adds the ESP-IDF Kconfig/config mapping. `mbedtls-core-ed25519.patch` ports the Ed25519/EdDSA implementation onto Espressif's 3.6.3 mbedTLS while preserving ESP-IDF's legacy `mbedtls_ecp_set_zero()` / `mbedtls_ecp_is_zero()` API used by components such as `wpa_supplicant`. It also classifies Ed25519 as an RFC 8410 key and adds the Ed25519 AlgorithmIdentifier mapping needed to emit PIV attestation certificates.
 
 Apply with `tools/prepare_esp32s3_ed25519.sh`; do not apply either patch manually in production workflows. The script validates the exact base revisions and is idempotent.
+
+The same preparation script also applies `patches/mbedtls-cve-2026-34874.patch`, the upstream Mbed TLS allocation-failure fix (commit `bfaf4a47fd33da860796feaba6235847acb71127`) to the pinned ESP-IDF Mbed TLS source. This does not change the Ed25519 backport or the ESP-IDF base revision.
