@@ -14,8 +14,9 @@ extern int piv_unload(void);
  * Capture slot F9 before a global dynamic-store reset, while also dropping
  * any authenticated OpenPGP/PIV RAM sessions. */
 int picokey_prepare_device_reset(void) {
-    openpgp_unload();
-    piv_unload();
+    openpgp_reset_all_sessions();
+    piv_reset_all_sessions();
+    file_clear_all_authenticated_sessions();
     int r = piv_prepare_device_reset();
     if (r != PICOKEY_OK) {
         return r;
