@@ -5,3 +5,5 @@ The native emulator is pinned to upstream mbedTLS v3.6.5 at `e185d7fd85499c8ce5c
 `eddsa.patch` is based on the EdDSA-only delta from `librekeys/mbedtls` branch `mbedtls-3.6-eddsa`, merge head `32604790a0433470ac1836be4faa1e0793035673`, relative to its upstream parent `14ada7f73c71f4207dfe15c86d6585647ca35237`. The project patch additionally supplies the Ed25519 RFC 8410 AlgorithmIdentifier mapping required by PIV attestation. It applies cleanly to the pinned v3.6.5 submodule.
 
 The host compatibility tests apply this patch to a disposable clone and mount that clone over `/src/pico-keys-sdk/mbedtls` inside the isolated test container. The project submodule itself is never modified.
+
+`tools/prepare_host_eddsa_mbedtls.sh` additionally applies `patches/mbedtls-cve-2026-34874.patch` (upstream commit `bfaf4a47fd33da860796feaba6235847acb71127`) to the disposable host source clone. Direct builds against the unpatched 3.6.5 submodule do not include this security fix.
