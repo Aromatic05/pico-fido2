@@ -610,7 +610,7 @@ def expect_ctap_error(action, expected: CtapError.ERR, label: str) -> None:
 
 def run_fido_storage_fault_cycles(binary: Path) -> None:
     # required fresh-init device-root write failure.
-    # setPIN verifier/device-root transaction failure.
+    # setPIN verifier failure; device root is not PIN-rewrapped.
     # changePIN rollback must preserve the old resident identity.
     # retry counters and pinUvAuthToken persistence must fail closed.
     # resident credential and RP metadata must remain consistent.
@@ -656,7 +656,6 @@ def run_fido_storage_fault_cycles(binary: Path) -> None:
 
     for fid, label, nth in (
         ("0x1080", "PIN verifier", "1"),
-        ("0xCC00", "device-root rewrap", "2"),
     ):
         with tempfile.TemporaryDirectory(prefix="pico-fido-fault-pin-") as tmp:
             run_dir = Path(tmp)
