@@ -292,8 +292,52 @@ def r4_03(binary):
                 assert LargeBlobs(ctap).read_blob_array() == [{"marker": b"after-assertion"}]
 
 
+def r6_01(binary):
+    import hashlib
+    with tempfile.TemporaryDirectory(prefix="p1-preview-auth-") as tmp:
+        with running(binary, Path(tmp)):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                pin.set_pin("Security42")
+                credential = make_fido(ctap, pin, True)
+                protocol = PinProtocolV2()
+                rp_hash = hashlib.sha256(b"p1.invalid").digest()
+                descriptor = {"type": "public-key", "id": credential}
+                params = {1: {}, 2: {}, 4: {1: rp_hash}, 6: {2: descriptor}}
+
+                def request(opcode, subcommand, token, expected):
+                    subparams = params[subcommand]
+                    message = bytes((subcommand,)) + (cbor.encode(subparams) if subparams else b"")
+                    body = {1: subcommand, 3: 2, 4: protocol.authenticate(token, message)}
+                    body.update({2: subparams} if subparams else {})
+                    result = device.call(CTAPHID.CBOR, bytes((opcode,)) + cbor.encode(body))
+                    assert result[0] == expected, (opcode, subcommand, result.hex())
+
+                ga = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.GET_ASSERTION)
+                for opcode in (0x0A, 0x41):
+                    for subcommand in params:
+                        request(opcode, subcommand, ga, 0x33)
+                wrong_rp = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT,
+                                              permissions_rpid="other.invalid")
+                for opcode in (0x0A, 0x41):
+                    request(opcode, 4, wrong_rp, 0x33)
+                    request(opcode, 6, wrong_rp, 0x33)
+                cm = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT)
+                assert CredentialManagement(ctap, protocol, cm).get_metadata()[1] == 1
+                for opcode in (0x0A, 0x41):
+                    request(opcode, 1, cm, 0)
+                    request(opcode, 4, cm, 0)
+                scoped = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT,
+                                            permissions_rpid="p1.invalid")
+                request(0x41, 6, scoped, 0)
+                cm = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT)
+                assert CredentialManagement(ctap, protocol, cm).get_metadata()[1] == 0
+
+
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
-         "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03, "R4-03": r4_03}
+         "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03, "R4-03": r4_03,
+         "R6-01": r6_01}
 
 
 def main():
