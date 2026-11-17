@@ -8,6 +8,7 @@ import tempfile
 import shlex
 import subprocess
 import hmac
+import time
 from unittest import TestCase
 from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, LargeBlobs, CredentialManagement
@@ -338,6 +339,32 @@ def r6_01(binary):
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
          "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03, "R4-03": r4_03,
          "R6-01": r6_01}
+
+
+def r3_04(binary):
+    run_c_test(binary, "pin_token_timer_test.c")
+    with tempfile.TemporaryDirectory(prefix="p1-token-expiry-") as tmp:
+        with running(binary, Path(tmp)):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                pin.set_pin("Security42")
+                token = pin.get_pin_token("Security42", permissions=(ClientPin.PERMISSION.CREDENTIAL_MGMT
+                                          | ClientPin.PERMISSION.MAKE_CREDENTIAL))
+                protocol = PinProtocolV2()
+                cm = CredentialManagement(ctap, protocol, token)
+                assert cm.get_metadata()[1] == 0
+                time.sleep(31)
+                ctap_error(CtapError.ERR.PIN_AUTH_INVALID, cm.get_metadata)
+                ctap_error(CtapError.ERR.PIN_AUTH_INVALID, ctap.make_credential,
+                           bytes(32), {"id": "expired.invalid"}, {"id": b"user"},
+                           [{"type": "public-key", "alg": -7}],
+                           pin_uv_param=protocol.authenticate(token, bytes(32)), pin_uv_protocol=2)
+                fresh = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.CREDENTIAL_MGMT)
+                assert CredentialManagement(ctap, protocol, fresh).get_metadata()[1] == 0
+
+
+CASES["R3-04"] = r3_04
 
 
 def main():
