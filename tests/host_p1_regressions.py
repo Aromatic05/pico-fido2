@@ -5,6 +5,8 @@ import argparse
 from contextlib import contextmanager
 from pathlib import Path
 import tempfile
+import shlex
+import subprocess
 
 from host_powercycle_durability import Emulator, apdu, transmit, open_fido
 from fido2 import cbor
@@ -132,7 +134,30 @@ def r2_04(binary):
                     assert device.call(CTAPHID.CBOR, request)[0] == 0x7F, (length, marker)
 
 
-CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04}
+def r2_05(binary):
+    build = binary.parent
+    flags_file = build / "CMakeFiles/pico_fido2.dir/flags.make"
+    flags = dict(line.split(" = ", 1) for line in flags_file.read_text().splitlines() if " = " in line)
+    with tempfile.TemporaryDirectory(prefix="p1-hotp-button-") as tmp:
+        executable = Path(tmp) / "hotp-button"
+        oath_source = Path(__file__).resolve().parents[1] / "pico-fido/src/fido/oath.c"
+        # Keep the real HMAC implementation; applet registration is unnecessary
+        # in this isolated button test and would retain unrelated APDU handlers.
+        oath = Path(tmp) / "oath.c"
+        oath.write_text('#include "pico_keys.h"\n#undef INITIALIZER\n'
+                        '#define INITIALIZER(f) static void __attribute__((unused)) f(void)\n'
+                        f'#include "{oath_source}"\n')
+        subprocess.run([
+            "cc", *shlex.split(flags["C_DEFINES"]), *shlex.split(flags["C_INCLUDES"]),
+            *shlex.split(flags["C_FLAGS"]), "--param=asan-globals=0", "-Wl,--gc-sections",
+            str(Path(__file__).with_name("otp_hotp_button_test.c")),
+            str(oath),
+            str(build / "libmbedtls.a"), "-o", str(executable),
+        ], check=True)
+        subprocess.run([str(executable)], check=True, cwd=tmp)
+
+
+CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05}
 
 
 def main():
