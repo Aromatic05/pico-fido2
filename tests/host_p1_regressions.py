@@ -215,8 +215,35 @@ def r5_03(binary):
             assert len(command(emulator, 0x47, 0x81, data=b"\xB6\x00")) > 64
 
 
+def rsa_import(key):
+    from yubikit.core import Tlv
+    numbers = key.private_numbers()
+    values = [value.to_bytes((value.bit_length() + 7) // 8, "big")
+              for value in (numbers.public_numbers.e, numbers.p, numbers.q)]
+    descriptors = b"".join(bytes(Tlv(tag, value))[:-len(value)]
+                           for tag, value in zip((0x91, 0x92, 0x93), values))
+    return bytes(Tlv(0x4D, b"\xB6\x00" + Tlv(0x7F48, descriptors) + Tlv(0x5F48, b"".join(values))))
+
+
+def r3_03(binary):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    oversized = rsa_import(rsa.generate_private_key(public_exponent=65537, key_size=5120))
+    normal = rsa_import(rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    with tempfile.TemporaryDirectory(prefix="p1-rsa-import-") as tmp:
+        with running(binary, Path(tmp)) as emulator:
+            openpgp(emulator)
+            command(emulator, 0xDB, 0x3F, 0xFF, oversized, 0x6700)
+            command(emulator, 0xDB, 0x3F, 0xFF, normal)
+            public = command(emulator, 0x47, 0x81, data=b"\xB6\x00")
+            command(emulator, 0xDA, p2=0xC1, data=bytes.fromhex("010400002000"))
+            command(emulator, 0xDB, 0x3F, 0xFF, normal, 0x6700)
+            command(emulator, 0xDA, p2=0xC1, data=bytes.fromhex("010800002000"))
+            command(emulator, 0xDB, 0x3F, 0xFF, normal)
+            assert command(emulator, 0x47, 0x81, data=b"\xB6\x00") == public
+
+
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
-         "H-03": h_03, "H-04": h_04, "R5-03": r5_03}
+         "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03}
 
 
 def main():
