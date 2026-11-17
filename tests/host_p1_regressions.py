@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import shlex
 import subprocess
+import hmac
 
 from host_powercycle_durability import Emulator, apdu, transmit, open_fido
 from fido2 import cbor
@@ -134,12 +135,23 @@ def r2_04(binary):
                     assert device.call(CTAPHID.CBOR, request)[0] == 0x7F, (length, marker)
 
 
-def r2_05(binary):
+def run_c_test(binary, source, extra_sources=()):
     build = binary.parent
     flags_file = build / "CMakeFiles/pico_fido2.dir/flags.make"
     flags = dict(line.split(" = ", 1) for line in flags_file.read_text().splitlines() if " = " in line)
     with tempfile.TemporaryDirectory(prefix="p1-hotp-button-") as tmp:
         executable = Path(tmp) / "hotp-button"
+        subprocess.run([
+            "cc", *shlex.split(flags["C_DEFINES"]), *shlex.split(flags["C_INCLUDES"]),
+            *shlex.split(flags["C_FLAGS"]), "--param=asan-globals=0", "-Wl,--gc-sections",
+            str(Path(__file__).with_name(source)), *map(str, extra_sources),
+            str(build / "libmbedtls.a"), "-o", str(executable),
+        ], check=True)
+        subprocess.run([str(executable)], check=True, cwd=tmp)
+
+
+def r2_05(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-oath-source-") as tmp:
         oath_source = Path(__file__).resolve().parents[1] / "pico-fido/src/fido/oath.c"
         # Keep the real HMAC implementation; applet registration is unnecessary
         # in this isolated button test and would retain unrelated APDU handlers.
@@ -147,14 +159,7 @@ def r2_05(binary):
         oath.write_text('#include "pico_keys.h"\n#undef INITIALIZER\n'
                         '#define INITIALIZER(f) static void __attribute__((unused)) f(void)\n'
                         f'#include "{oath_source}"\n')
-        subprocess.run([
-            "cc", *shlex.split(flags["C_DEFINES"]), *shlex.split(flags["C_INCLUDES"]),
-            *shlex.split(flags["C_FLAGS"]), "--param=asan-globals=0", "-Wl,--gc-sections",
-            str(Path(__file__).with_name("otp_hotp_button_test.c")),
-            str(oath),
-            str(build / "libmbedtls.a"), "-o", str(executable),
-        ], check=True)
-        subprocess.run([str(executable)], check=True, cwd=tmp)
+        run_c_test(binary, "otp_hotp_button_test.c", [oath])
 
 
 def h_03(binary):
@@ -174,8 +179,31 @@ def h_03(binary):
             piv.authenticate(DEFAULT_MANAGEMENT_KEY)
 
 
+def h_04(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-oath-verify-") as tmp:
+        with running(binary, Path(tmp)) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            secret = b"12345678901234567890"
+            name = b"\x71\x04hotp"
+            command(emulator, 1, data=name + b"\x73\x16\x11\x06" + secret)
+            verify = name + b"\x75\x04" + (755224).to_bytes(4, "big")
+            command(emulator, 0xB1, data=verify)
+            challenge = b"12345678"
+            key = b"access-code-key"
+            command(emulator, 3, data=bytes((0x73, len(key) + 1, 0x21)) + key
+                    + b"\x74\x08" + challenge + b"\x75\x14" + hmac.digest(key, challenge, "sha1"))
+            selected = command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            command(emulator, 0xA1, expected=0x6982)
+            command(emulator, 0xB1, data=verify, expected=0x6982)
+            offset = selected.index(b"\x74\x08") + 2
+            command(emulator, 0xA3, data=b"\x75\x14" + hmac.digest(key, selected[offset:offset + 8], "sha1")
+                    + b"\x74\x08" + challenge)
+            command(emulator, 0xB1, data=verify)
+
+    run_c_test(binary, "oath_verify_hotp_test.c", [Path(__file__).resolve().parents[1] / "pico-keys-sdk/src/asn1.c"])
+
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
-         "H-03": h_03}
+         "H-03": h_03, "H-04": h_04}
 
 
 def main():
