@@ -56,6 +56,9 @@ int main(void) {
             assert(strcmp(output, digits == 6 ? six[counter] : eight[counter]) == 0);
             assert(get_uint64_t_be(record + 52) == (uint64_t)counter + 1);
         }
+        config->ext_flags = DORMANT;
+        assert(otp_button_pressed(1) == 1);
+        assert(get_uint64_t_be(record + 52) == 3);
     }
     puts("R2-05 HOTP button output and counters: PASS");
     return 0;

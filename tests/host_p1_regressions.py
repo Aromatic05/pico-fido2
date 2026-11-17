@@ -435,6 +435,44 @@ def r3_06(binary):
 CASES["R3-06"] = r3_06
 
 
+def r3_07(binary):
+    from otp_sector_powercut_matrix import crc16, hmac_slot_payload, read_live_dynamic_record
+    def configuration(ext=0, ticket=0x40):
+        data = bytearray(hmac_slot_payload()[0][:52])
+        data[45] = ext
+        data[46] = ticket
+        data[50:52] = ((~crc16(data[:50])) & 0xFFFF).to_bytes(2, "little")
+        return bytes(data)
+    with tempfile.TemporaryDirectory(prefix="p1-otp-policy-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272001"))
+            command(emulator, 1, 1, data=configuration() + bytes(8))
+            before = read_live_dynamic_record(directory / "memory.flash", 0xBB00)
+            command(emulator, 1, 4, data=configuration(0x20) + bytes(6), expected=0x6985)
+            assert read_live_dynamic_record(directory / "memory.flash", 0xBB00) == before
+            command(emulator, 1, 1, data=configuration(0x60) + bytes(8))
+            command(emulator, 1, 0x30, data=b"challenge", expected=0x6985)
+            command(emulator, 1, 4, data=configuration(0x20) + bytes(6))
+            assert len(command(emulator, 1, 0x30, data=b"challenge")) == 20
+            command(emulator, 1, 1, data=configuration(0x20, 0xC0) + bytes(8))
+            command(emulator, 1, 3, data=configuration(0x20) + bytes(8), expected=0x6982)
+            command(emulator, 1, 1, data=configuration(0x20) + bytes(8))
+            command(emulator, 1, 3, data=configuration(0x20) + bytes(8))
+            command(emulator, 1, 1, data=configuration(0x20, 0xC0) + bytes(8))
+            command(emulator, 1, 5, data=configuration(0x20) + bytes(6), expected=0x6982)
+            command(emulator, 1, 3, data=bytes(58), expected=0x6982)
+            command(emulator, 1, 6, expected=0x6982)
+            command(emulator, 1, 1, data=configuration(0x20) + bytes(8))
+            command(emulator, 1, 3, data=configuration(0x20, 0xC0) + bytes(8))
+            command(emulator, 1, 1, data=configuration(0x20, 0xC0) + bytes(8))
+            command(emulator, 1, 5, data=configuration(0x20) + bytes(6))
+    r2_05(binary)
+
+
+CASES["R3-07"] = r3_07
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
