@@ -157,7 +157,25 @@ def r2_05(binary):
         subprocess.run([str(executable)], check=True, cwd=tmp)
 
 
-CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05}
+def h_03(binary):
+    from host_hsmauth import TcpSmartCardConnection
+    from yubikit.piv import PivSession, DEFAULT_MANAGEMENT_KEY, MANAGEMENT_KEY_TYPE
+    with tempfile.TemporaryDirectory(prefix="p1-piv-management-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            piv = PivSession(TcpSmartCardConnection(emulator.ccid))
+            piv.authenticate(DEFAULT_MANAGEMENT_KEY)
+            piv.set_management_key(MANAGEMENT_KEY_TYPE.AES192, bytes(range(24)))
+            piv.authenticate(bytes(range(24)))
+        with running(binary, directory) as emulator:
+            piv = PivSession(TcpSmartCardConnection(emulator.ccid))
+            piv.authenticate(bytes(range(24)))
+            piv.set_management_key(MANAGEMENT_KEY_TYPE.AES192, DEFAULT_MANAGEMENT_KEY)
+            piv.authenticate(DEFAULT_MANAGEMENT_KEY)
+
+
+CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
+         "H-03": h_03}
 
 
 def main():
