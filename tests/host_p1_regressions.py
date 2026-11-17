@@ -522,6 +522,119 @@ def r4_02(binary):
 CASES["R4-02"] = r4_02
 
 
+def pin_wrapped_fixture(binary, directory):
+    build = binary.parent
+    metadata = build / "CMakeFiles/pico_fido2.dir"
+    flags = dict(line.split(" = ", 1) for line in (metadata / "flags.make").read_text().splitlines()
+                 if " = " in line)
+    # Use the actual pre-migration writer to create a PIN-wrapped root. The
+    # product never links this historical code; only this temporary fixture does.
+    repository = Path(__file__).resolve().parents[1] / "pico-fido"
+    source = directory / "legacy_client_pin.c"
+    source.write_bytes(subprocess.check_output([
+        "git", "-C", str(repository), "show", "035ae42^:src/fido/cbor_client_pin.c",
+    ]))
+    obj = directory / "legacy_client_pin.o"
+    subprocess.run(["cc", *shlex.split(flags["C_DEFINES"]), *shlex.split(flags["C_INCLUDES"]),
+                    *shlex.split(flags["C_FLAGS"]), "-c", str(source), "-o", str(obj)], check=True)
+    link = shlex.split((metadata / "link.txt").read_text())
+    old_object = "CMakeFiles/pico_fido2.dir/pico-fido/src/fido/cbor_client_pin.c.o"
+    link[link.index(old_object)] = str(obj)
+    executable = directory / "pin-wrapped-fixture"
+    link[link.index("-o") + 1] = str(executable)
+    subprocess.run([arg for arg in link if not arg.startswith("-Wl,--dependency-file=")],
+                   check=True, cwd=build)
+    return executable
+
+
+def h_05(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-root-migration-") as tmp:
+        directory = Path(tmp)
+        legacy = pin_wrapped_fixture(binary, directory)
+        with running(legacy, directory):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                pin.set_pin("Security42")
+                token = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.MAKE_CREDENTIAL,
+                                          permissions_rpid="migration.invalid")
+                made = ctap.make_credential(bytes(32), {"id": "migration.invalid"}, {"id": b"user"},
+                                           [{"type": "public-key", "alg": -7}], options={"rk": True},
+                                           pin_uv_param=PinProtocolV2().authenticate(token, bytes(32)),
+                                           pin_uv_protocol=2)
+                credential = made.auth_data.credential_data
+        flash = directory / "memory.flash"
+        original = flash.read_bytes()
+        address = flash_record(original, 0xCC00)
+        assert original[address + 18:address + 21] == b"\x3d\x00\x02"
+        corrupt = bytearray(original)
+        corrupt[address + 80] ^= 1
+        flash.write_bytes(corrupt)
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                ctap_error(CtapError.ERR.PROCESSING, ClientPin(ctap).get_pin_token, "Security42")
+        rejected = flash.read_bytes()
+        address = flash_record(rejected, 0xCC00)
+        assert rejected[address + 18:address + 81] == corrupt[address + 18:address + 81]
+
+        for permissions in (None, ClientPin.PERMISSION.GET_ASSERTION):
+            flash.write_bytes(original)
+            with running(binary, directory):
+                device, ctap = open_fido()
+                with device:
+                    ctap_error(CtapError.ERR.NO_CREDENTIALS, ctap.get_assertion,
+                               "migration.invalid", bytes(32))
+                    pin = ClientPin(ctap)
+                    ctap_error(CtapError.ERR.PIN_INVALID, pin.get_pin_token, "WrongPIN")
+                    assert len(pin.get_pin_token("Security42", permissions=permissions)) == 32
+            migrated = flash.read_bytes()
+            address = flash_record(migrated, 0xCC00)
+            assert migrated[address + 18:address + 21] == b"\x21\x00\x01"
+            with running(binary, directory):
+                device, ctap = open_fido()
+                with device:
+                    assertion = ctap.get_assertion("migration.invalid", bytes(32))
+                    assert assertion.credential["id"] == credential.credential_id
+                    assert assertion.auth_data.flags & 1
+                    assert assertion.auth_data.flags & 4 == 0
+                    credential.public_key.verify(assertion.auth_data + bytes(32), assertion.signature)
+
+        flash.write_bytes(original)
+        with running(binary, directory, {"PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE": "0xCC00"}) as emulator:
+            device, ctap = open_fido()
+            with device:
+                ctap_error(CtapError.ERR.PROCESSING, ClientPin(ctap).get_pin_token, "Security42")
+            assert "PICO_KEYS_EMU_FILE_PUT_FAULT fid=0xcc00" in emulator.log_path.read_text()
+        failed = flash.read_bytes()
+        address = flash_record(failed, 0xCC00)
+        assert failed[address + 18:address + 21] == b"\x3d\x00\x02"
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                assert len(ClientPin(ctap).get_pin_token("Security42")) == 32
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                assertion = ctap.get_assertion("migration.invalid", bytes(32))
+                credential.public_key.verify(assertion.auth_data + bytes(32), assertion.signature)
+
+        flash.write_bytes(original)
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                ClientPin(ctap).change_pin("Security42", "Changed42")
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                assertion = ctap.get_assertion("migration.invalid", bytes(32))
+                credential.public_key.verify(assertion.auth_data + bytes(32), assertion.signature)
+                assert len(ClientPin(ctap).get_pin_token("Changed42")) == 32
+
+
+CASES["H-05"] = h_05
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
