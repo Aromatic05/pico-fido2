@@ -367,6 +367,38 @@ def r3_04(binary):
 CASES["R3-04"] = r3_04
 
 
+def r5_04(binary):
+    old = b"\x80\x08" + b"12345678"
+    wrong = b"\x80\x08" + b"00000000"
+    new = b"\x81\x08" + b"87654321"
+    with tempfile.TemporaryDirectory(prefix="p1-oath-pin-block-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            command(emulator, 0xB4, data=old)
+            command(emulator, 0xB3, data=wrong + new, expected=0x6982)
+            for _ in range(2):
+                command(emulator, 0xB2, data=wrong, expected=0x6982)
+            command(emulator, 0xB2, data=old, expected=0x6982)
+            command(emulator, 0xB3, data=old + new, expected=0x6982)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            command(emulator, 0xB3, data=old + new, expected=0x6982)
+    with tempfile.TemporaryDirectory(prefix="p1-oath-pin-change-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            command(emulator, 0xB4, data=old)
+            command(emulator, 0xB3, data=old + new)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272101"))
+            command(emulator, 0xB2, data=old, expected=0x6982)
+            command(emulator, 0xB2, data=b"\x80\x08" + b"87654321")
+
+
+CASES["R5-04"] = r5_04
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
