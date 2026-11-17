@@ -473,6 +473,27 @@ def r3_07(binary):
 CASES["R3-07"] = r3_07
 
 
+def r4_04(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-openpgp-aes-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            openpgp(emulator)
+            command(emulator, 0xDA, p2=0xC2, data=bytes.fromhex("122A8648CE3D030107"))
+            command(emulator, 0x47, 0x80, data=b"\xB8\x00")
+            plaintext = command(emulator, 0x2A, 0x80, 0x86, b"\x02" + bytes(16))
+            assert len(plaintext) == 16
+        with running(binary, directory) as emulator:
+            openpgp(emulator)
+            assert command(emulator, 0x2A, 0x80, 0x86, b"\x02" + bytes(16)) == plaintext
+        with running(binary, directory, {"PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE": "0x00D5"}) as emulator:
+            openpgp(emulator)
+            assert command(emulator, 0x47, 0x80, data=b"\xB8\x00", expected=0x6400) == b""
+            assert "PICO_KEYS_EMU_FILE_PUT_FAULT fid=0x00d5" in emulator.log_path.read_text()
+
+
+CASES["R4-04"] = r4_04
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)

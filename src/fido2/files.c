@@ -479,6 +479,9 @@ file_t file_entries[] = {
                .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH, .data = NULL,
                .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_R_WP },
 
+    { .fid = EF_AES_KEY, .parent = 0, .name = NULL,
+        .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH, .data = NULL,
+        .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_NONE },
     /* 132 */ { .fid = 0x0000, .parent = 0, .name = openpgp_aid, .type = FILE_TYPE_WORKING_EF,
         .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_RO },
     { .fid = EF_KEY_DEV, .parent = 0, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = { 0xff } }, // Device Key
