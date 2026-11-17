@@ -6,7 +6,9 @@ from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 
-from host_powercycle_durability import Emulator, apdu, transmit
+from host_powercycle_durability import Emulator, apdu, transmit, open_fido
+from fido2 import cbor
+from fido2.hid import CTAPHID
 
 
 OPENPGP_AID = bytes.fromhex("D27600012401")
@@ -93,7 +95,44 @@ def r2_03(binary):
             assert command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT, 0x6400) == b""
 
 
-CASES = {"R2-02": r2_02, "R2-03": r2_03}
+def flash_record(image, fid):
+    root = len(image) - 16 - 4 * 4096 - 12
+    address = int.from_bytes(image[root:root + 8], "little")
+    visited = set()
+    while address:
+        assert 16 * 4096 <= address < root and address not in visited
+        visited.add(address)
+        if int.from_bytes(image[address + 16:address + 18], "little") == fid:
+            return address
+        address = int.from_bytes(image[address:address + 8], "little")
+    raise AssertionError(f"missing flash record {fid:#x}")
+
+
+def r2_04(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-root-key-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory):
+            with open_fido()[0] as device:
+                request = b"\x01" + cbor.encode({
+                    1: bytes(32), 2: {"id": "root-key.invalid"},
+                    3: {"id": b"user"}, 4: [{"type": "public-key", "alg": -7}],
+                })
+                assert device.call(CTAPHID.CBOR, request)[0] == 0
+        flash = directory / "memory.flash"
+        original = flash.read_bytes()
+        record = flash_record(original, 0xCC00)
+        assert int.from_bytes(original[record + 18:record + 20], "little") == 33
+        for length, marker in ((1, 1), (31, 1), (33, 0xFF), (33, 2)):
+            image = bytearray(original)
+            image[record + 18:record + 20] = length.to_bytes(2, "little")
+            image[record + 20] = marker
+            flash.write_bytes(image)
+            with running(binary, directory):
+                with open_fido()[0] as device:
+                    assert device.call(CTAPHID.CBOR, request)[0] == 0x7F, (length, marker)
+
+
+CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04}
 
 
 def main():
