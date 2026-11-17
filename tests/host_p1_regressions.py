@@ -494,6 +494,34 @@ def r4_04(binary):
 CASES["R4-04"] = r4_04
 
 
+def r4_02(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-get-data-capacity-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            openpgp(emulator)
+            command(emulator, 0xDA, p2=0x5B, data=b"N" * 2041)
+            command(emulator, 0xDA, 0x5F, 0x2D, b"en" * 32)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OPENPGP_AID)
+            assert command(emulator, 0xCA, p2=0x65, expected=0x6700) == b""
+            command(emulator, 0x20, p2=0x83, data=b"12345678")
+            command(emulator, 0xDA, p2=0x5B, data=b"Normal Name")
+            assert b"Normal Name" in command(emulator, 0xCA, p2=0x65)
+            command(emulator, 0xDA, p2=0xC7, data=b"F" * 64)
+            command(emulator, 0xCA, p2=0xC5, expected=0x6700)
+            command(emulator, 0xDA, p2=0xC7, data=b"F" * 20)
+            assert command(emulator, 0xCA, p2=0xC5) == b"F" * 20 + bytes(40)
+            assert command(emulator, 0xCA, p2=0xC6) == bytes(60)
+            assert command(emulator, 0xCA, p2=0xCD) == bytes(12)
+            for tag in (0x6E, 0xFA):
+                response = command(emulator, 0xCA, p2=tag)
+                assert response[:2] == bytes((tag, 0x82))
+                assert int.from_bytes(response[2:4], "big") == len(response) - 4
+
+
+CASES["R4-02"] = r4_02
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
