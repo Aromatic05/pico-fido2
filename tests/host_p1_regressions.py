@@ -8,6 +8,10 @@ import tempfile
 import shlex
 import subprocess
 import hmac
+from unittest import TestCase
+from fido2.ctap import CtapError
+from fido2.ctap2 import ClientPin, LargeBlobs, CredentialManagement
+from fido2.ctap2.pin import PinProtocolV2
 
 from host_powercycle_durability import Emulator, apdu, transmit, open_fido
 from fido2 import cbor
@@ -242,8 +246,54 @@ def r3_03(binary):
             assert command(emulator, 0x47, 0x81, data=b"\xB6\x00") == public
 
 
+def ctap_error(expected, operation, *args, **kwargs):
+    with TestCase().assertRaises(CtapError) as raised:
+        operation(*args, **kwargs)
+    assert raised.exception.code == expected, raised.exception
+
+
+def make_fido(ctap, client_pin, resident=False):
+    protocol = PinProtocolV2()
+    token = client_pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.MAKE_CREDENTIAL,
+                                     permissions_rpid="p1.invalid")
+    made = ctap.make_credential(bytes(32), {"id": "p1.invalid"}, {"id": b"user"},
+                                [{"type": "public-key", "alg": -7}], options={"rk": resident},
+                                pin_uv_param=protocol.authenticate(token, bytes(32)), pin_uv_protocol=2)
+    return made.auth_data.credential_data.credential_id
+
+
+def r4_03(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-ga-lbw-") as tmp:
+        with running(binary, Path(tmp)):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                pin.set_pin("Security42")
+                credential = make_fido(ctap, pin)
+                protocol = PinProtocolV2()
+                for permissions in (ClientPin.PERMISSION.GET_ASSERTION,
+                                    ClientPin.PERMISSION.GET_ASSERTION | ClientPin.PERMISSION.LARGE_BLOB_WRITE):
+                    token = pin.get_pin_token("Security42", permissions=permissions)
+                    ctap.get_assertion("p1.invalid", bytes(32),
+                                       allow_list=[{"type": "public-key", "id": credential}],
+                                       pin_uv_param=protocol.authenticate(token, bytes(32)), pin_uv_protocol=2)
+                    blobs = LargeBlobs(ctap, protocol, token)
+                    # Every token keeps exactly the permissions it was granted.
+                    expected = {ClientPin.PERMISSION.GET_ASSERTION: 0x33,
+                                ClientPin.PERMISSION.GET_ASSERTION | ClientPin.PERMISSION.LARGE_BLOB_WRITE: 0}
+                    payload = cbor.encode([{"marker": b"after-assertion"}])
+                    import hashlib
+                    data = payload + hashlib.sha256(payload).digest()[:16]
+                    message = bytes([0xFF]) * 32 + b"\x0C\x00" + bytes(4) + hashlib.sha256(data).digest()
+                    result = device.call(CTAPHID.CBOR, b"\x0C" + cbor.encode({
+                        2: data, 3: 0, 4: len(data), 5: protocol.authenticate(token, message), 6: 2,
+                    }))
+                    assert result[0] == expected[permissions], result.hex()
+                assert LargeBlobs(ctap).read_blob_array() == [{"marker": b"after-assertion"}]
+
+
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
-         "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03}
+         "H-03": h_03, "H-04": h_04, "R5-03": r5_03, "R3-03": r3_03, "R4-03": r4_03}
 
 
 def main():
