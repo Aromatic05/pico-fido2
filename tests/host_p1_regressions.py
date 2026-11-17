@@ -399,6 +399,42 @@ def r5_04(binary):
 CASES["R5-04"] = r5_04
 
 
+def r3_06(binary):
+    from otp_sector_powercut_matrix import crc16, yubiotp_slot_payload, read_live_dynamic_record
+    config = bytearray(yubiotp_slot_payload()[:52])
+    config[45] = 0x20
+    config[46] = 0x40
+    config[47] = 2
+    config[50:52] = ((~crc16(config[:50])) & 0xFFFF).to_bytes(2, "little")
+    with tempfile.TemporaryDirectory(prefix="p1-otp-update-counter-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272001"))
+            command(emulator, 1, 1, data=bytes(config) + bytes(8))
+        flash = directory / "memory.flash"
+        image = bytearray(flash.read_bytes())
+        record = flash_record(image, 0xBB00)
+        counter = bytes.fromhex("0000000012345678")
+        image[record + 72:record + 80] = counter
+        flash.write_bytes(image)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272001"))
+            update = bytearray(config)
+            update[46] |= 0x20
+            update[50:52] = ((~crc16(update[:50])) & 0xFFFF).to_bytes(2, "little")
+            command(emulator, 1, 4, data=bytes(update) + bytes(6))
+        stored = read_live_dynamic_record(flash, 0xBB00)
+        assert len(stored) == 60
+        assert stored[52:] == counter
+        assert stored[46] == 0x60
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A0000005272001"))
+        assert read_live_dynamic_record(flash, 0xBB00)[52:] == counter
+
+
+CASES["R3-06"] = r3_06
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
