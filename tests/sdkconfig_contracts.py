@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,6 +42,20 @@ def main() -> None:
     ):
         if deprecated in defaults:
             raise AssertionError(f"deprecated IDF Kconfig alias remains in sdkconfig.defaults: {deprecated}")
+
+    for script in ("build_esp32s3_ab_security_bundle.sh", "build_esp32s3_ab_ota_update_bundle.sh"):
+        # Execute the actual argument defaults and profile generator without
+        # entering the build/provisioning portion of either script.
+        initialization = (ROOT / "tools" / script).read_text().split("\nsource ", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="security-build-defaults-") as tmp:
+            generated = subprocess.run(
+                ["bash", "-c", initialization + '\nsource ./tools/esp32s3_maintenance_profile.sh\n'
+                 'prepare_maintenance_profile_defaults "$maintenance_profile" "$1"', "test", tmp],
+                cwd=ROOT, check=True, text=True, capture_output=True,
+            )
+            production = Path(generated.stdout.strip()).read_text()
+            assert "# CONFIG_PICO_FIDO2_DEVELOPMENT_MAINTENANCE_OPEN is not set" in production
+            assert "# CONFIG_PICO_FIDO2_DEVELOPMENT_INSECURE_OTA is not set" in production
 
     print(f"sdkconfig defaults: PASS ({len(files)} files, {checked} Kconfig assignments)")
 

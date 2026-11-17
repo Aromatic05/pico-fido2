@@ -4,7 +4,7 @@ set -euo pipefail
 provision_dir="${1:-build-provisioning}"
 out_dir="${2:-build-ab-security-bundle}"
 security_version="${3:-0}"
-maintenance_profile="${4:-development}"
+maintenance_profile="${4:-production}"
 build_dir=build-security-ab-initial
 sdkconfig=sdkconfig.security-ab-initial
 defaults='sdkconfig.defaults;sdkconfig.esp32s3-physical.defaults;sdkconfig.ble.defaults;sdkconfig.wifi.defaults;sdkconfig.security-preprovisioned.defaults;sdkconfig.secure-ota.defaults'
