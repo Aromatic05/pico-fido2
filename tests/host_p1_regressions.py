@@ -202,8 +202,21 @@ def h_04(binary):
 
     run_c_test(binary, "oath_verify_hotp_test.c", [Path(__file__).resolve().parents[1] / "pico-keys-sdk/src/asn1.c"])
 
+def r5_03(binary):
+    with tempfile.TemporaryDirectory(prefix="p1-import-length-") as tmp:
+        with running(binary, Path(tmp)) as emulator:
+            openpgp(emulator)
+            malformed = bytes.fromhex("4D13B6007F4808910192019382FFFF5F4803030507")
+            command(emulator, 0xDB, 0x3F, 0xFF, malformed, 0x6700)
+            for length in range(5, len(P256_IMPORT)):
+                command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT[:length], 0x6700)
+            command(emulator, 0xDA, p2=0xC1, data=P256_SIG)
+            command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT)
+            assert len(command(emulator, 0x47, 0x81, data=b"\xB6\x00")) > 64
+
+
 CASES = {"R2-02": r2_02, "R2-03": r2_03, "R2-04": r2_04, "R2-05": r2_05,
-         "H-03": h_03, "H-04": h_04}
+         "H-03": h_03, "H-04": h_04, "R5-03": r5_03}
 
 
 def main():
