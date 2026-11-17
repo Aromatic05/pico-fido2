@@ -62,7 +62,38 @@ def r2_02(binary):
             assert len(command(emulator, 0x47, 0x81, data=b"\xB6\x00")) > 64
 
 
-CASES = {"R2-02": r2_02}
+def r2_03(binary):
+    for attributes in (P256_SIG, bytes.fromhex("010800002000")):
+        with tempfile.TemporaryDirectory(prefix="p1-sign-counter-") as tmp:
+            directory = Path(tmp)
+            with running(binary, directory) as emulator:
+                openpgp(emulator)
+                command(emulator, 0xDA, p2=0xC1, data=attributes)
+                command(emulator, 0x47, 0x80, data=b"\xB6\x00")
+            fault = {"PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE": "0x0093"}
+            with running(binary, directory, fault) as emulator:
+                openpgp(emulator, 0x81)
+                assert command(emulator, 0x2A, 0x9E, 0x9A, bytes(32), 0x6400) == b""
+                assert "PICO_KEYS_EMU_FILE_PUT_FAULT fid=0x0093" in emulator.log_path.read_text()
+                assert command(emulator, 0xCA, p2=0x93) == bytes(3)
+            with running(binary, directory) as emulator:
+                openpgp(emulator, 0x81)
+                assert len(command(emulator, 0x2A, 0x9E, 0x9A, bytes(32))) >= 64
+                assert command(emulator, 0xCA, p2=0x93) == b"\x00\x00\x01"
+            with running(binary, directory, fault) as emulator:
+                openpgp(emulator)
+                assert command(emulator, 0x47, 0x80, data=b"\xB6\x00", expected=0x6400) == b""
+    with tempfile.TemporaryDirectory(prefix="p1-import-counter-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            openpgp(emulator)
+            command(emulator, 0xDA, p2=0xC1, data=P256_SIG)
+        with running(binary, directory, fault) as emulator:
+            openpgp(emulator)
+            assert command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT, 0x6400) == b""
+
+
+CASES = {"R2-02": r2_02, "R2-03": r2_03}
 
 
 def main():
