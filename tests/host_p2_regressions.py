@@ -30,8 +30,34 @@ def r5_07(binary):
             assert tlv_value(command(emulator, 0xF7, p2=0x9B), 5) == b"\x00"
 
 
+def r5_06(binary):
+    from unittest import TestCase
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from host_hsmauth import TcpSmartCardConnection
+    from yubikit.core.smartcard import ApduError
+    from yubikit.piv import DEFAULT_MANAGEMENT_KEY, KEY_TYPE, PIN_POLICY, SLOT, TOUCH_POLICY, PivSession
+
+    with TemporaryDirectory(prefix="p2-piv-verify-") as tmp, running(binary, Path(tmp)) as emulator:
+        piv = PivSession(TcpSmartCardConnection(emulator.ccid))
+        piv.authenticate(DEFAULT_MANAGEMENT_KEY)
+        slot, key_type = SLOT.AUTHENTICATION, KEY_TYPE.ECCP256
+        public = piv.generate_key(slot, key_type, PIN_POLICY.ONCE, TOUCH_POLICY.NEVER)
+        message = b"PIV VERIFY reset"
+        piv.verify_pin("123456")
+        public.verify(piv.sign(slot, key_type, message, hashes.SHA256()), message, ec.ECDSA(hashes.SHA256()))
+        command(emulator, 0x20, 0xFF, 0x80)
+        command(emulator, 0x20, 0x00, 0x80, expected=0x63C3)
+        with TestCase().assertRaises(ApduError) as rejected:
+            piv.sign(slot, key_type, message, hashes.SHA256())
+        assert rejected.exception.sw == 0x6982
+        piv.verify_pin("123456")
+        public.verify(piv.sign(slot, key_type, message, hashes.SHA256()), message, ec.ECDSA(hashes.SHA256()))
+
+
 CASES = {
     "r5-07": r5_07,
+    "r5-06": r5_06,
 }
 
 
