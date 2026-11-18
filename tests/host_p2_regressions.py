@@ -361,6 +361,37 @@ def r3_08(binary):
             assert second.auth_data.credential_data.credential_id != first.auth_data.credential_data.credential_id
 
 
+def r3_09(binary):
+    from fido2.ctap import CtapError
+    from fido2.ctap2 import ClientPin, Config
+    from fido2.ctap2.pin import PinProtocolV2
+
+    with TemporaryDirectory(prefix="p2-min-pin-length-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                long_pin = "A" * 63
+                pin.set_pin(long_pin)
+                token = pin.get_pin_token(long_pin, permissions=ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+                config = Config(ctap, PinProtocolV2(), token)
+                config.set_min_pin_length(8)
+                token = pin.get_pin_token(long_pin, permissions=ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+                config = Config(ctap, PinProtocolV2(), token)
+                for length in (7, 64, 260):
+                    ctap_error(CtapError.ERR.PIN_POLICY_VIOLATION, config.set_min_pin_length, length)
+                    info = ctap.get_info()
+                    assert info.min_pin_length == 8
+                    assert not info.force_pin_change
+                config.set_min_pin_length(63)
+                assert ctap.get_info().min_pin_length == 63
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                assert ctap.get_info().min_pin_length == 63
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -373,6 +404,7 @@ CASES = {
     "r5-08": r5_08,
     "r2-06": r2_06,
     "r3-08": r3_08,
+    "r3-09": r3_09,
 }
 
 
