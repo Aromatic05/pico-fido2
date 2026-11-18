@@ -4,8 +4,9 @@
 import argparse
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import TestCase
 
-from host_p1_regressions import OPENPGP_AID, P256_IMPORT, P256_SIG, command, openpgp, running
+from host_p1_regressions import OPENPGP_AID, P256_IMPORT, P256_SIG, command, flash_record, openpgp, running
 from host_protocol_smoke import tlv_value
 
 
@@ -31,7 +32,6 @@ def r5_07(binary):
 
 
 def r5_06(binary):
-    from unittest import TestCase
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
     from host_hsmauth import TcpSmartCardConnection
@@ -133,12 +133,61 @@ def r5_05(binary):
             verify_openpgp_signature(emulator, public)
 
 
+def r6_04(binary):
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    new_import = P256_IMPORT[:-32] + (2).to_bytes(32, "big")
+    old_public = ec.derive_private_key(1, ec.SECP256R1()).public_key()
+    new_public = ec.derive_private_key(2, ec.SECP256R1()).public_key()
+    with TemporaryDirectory(prefix="p2-openpgp-first-import-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            openpgp(emulator)
+            command(emulator, 0xDA, p2=0xC1, data=P256_SIG)
+        with running(binary, directory, {"PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE": "0x10d4"}) as emulator:
+            openpgp(emulator)
+            assert command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT, 0x6400) == b""
+            assert "PICO_KEYS_EMU_FILE_PUT_FAULT fid=0x10d4" in emulator.log_path.read_text()
+        with running(binary, directory) as emulator:
+            openpgp(emulator, 0x81)
+            command(emulator, 0x47, 0x81, data=b"\xb6\x00", expected=0x6A88)
+            with TestCase().assertRaisesRegex(AssertionError, "missing flash record 0x10d1"):
+                flash_record((directory / "memory.flash").read_bytes(), 0x10D1)
+    for fid in ("0x10d4", "0x0093", "0x10d1"):
+        with TemporaryDirectory(prefix="p2-openpgp-import-") as tmp:
+            directory = Path(tmp)
+            with running(binary, directory) as emulator:
+                openpgp(emulator)
+                command(emulator, 0xDA, p2=0xC1, data=P256_SIG)
+                command(emulator, 0xDB, 0x3F, 0xFF, P256_IMPORT)
+                stored_public = command(emulator, 0x47, 0x81, data=b"\xb6\x00")
+                command(emulator, 0x20, p2=0x81, data=b"123456")
+                verify_openpgp_signature(emulator, old_public)
+            with running(binary, directory, {"PICO_KEYS_EMU_FAIL_FILE_PUT_FID_ONCE": fid}) as emulator:
+                openpgp(emulator)
+                assert command(emulator, 0xDB, 0x3F, 0xFF, new_import, 0x6400) == b""
+                assert f"PICO_KEYS_EMU_FILE_PUT_FAULT fid={fid}" in emulator.log_path.read_text()
+                assert command(emulator, 0x47, 0x81, data=b"\xb6\x00") == stored_public
+                assert command(emulator, 0xCA, p2=0x93) == b"\x00\x00\x01"
+            with running(binary, directory) as emulator:
+                openpgp(emulator, 0x81)
+                assert command(emulator, 0x47, 0x81, data=b"\xb6\x00") == stored_public
+                assert command(emulator, 0xCA, p2=0x93) == b"\x00\x00\x01"
+                verify_openpgp_signature(emulator, old_public)
+                command(emulator, 0x20, p2=0x83, data=b"12345678")
+                command(emulator, 0xDB, 0x3F, 0xFF, new_import)
+                assert command(emulator, 0xCA, p2=0x93) == bytes(3)
+                command(emulator, 0x20, p2=0x81, data=b"123456")
+                verify_openpgp_signature(emulator, new_public)
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
     "r6-03": r6_03,
     "r6-02": r6_02,
     "r5-05": r5_05,
+    "r6-04": r6_04,
 }
 
 
