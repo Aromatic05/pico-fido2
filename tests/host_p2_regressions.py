@@ -213,6 +213,30 @@ def r6_05(binary):
             )
 
 
+def r4_05(binary):
+    with TemporaryDirectory(prefix="p2-oath-rename-tlv-") as tmp:
+        directory = Path(tmp)
+        old_name, long_name, longest = b"old", b"n" * 128, b"x" * 253
+        calculated = Tlv(0x75, b"\x06" + hmac.digest(OATH_SECRET, OATH_CHALLENGE, "sha1"))
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            # A name is not necessarily the first tag in the stored record.
+            command(emulator, 1, data=Tlv(0x73, b"\x21\x06" + OATH_SECRET) + Tlv(0x71, old_name))
+            command(emulator, 5, data=Tlv(0x71, old_name) + Tlv(0x71, long_name))
+            assert command(emulator, 0xA1) == bytes((0x72, 129, 0x21)) + long_name
+            assert oath_calculate(emulator, long_name) == calculated
+            oath_calculate(emulator, old_name, expected=0x6984)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            assert oath_calculate(emulator, long_name) == calculated
+            command(emulator, 5, data=Tlv(0x71, long_name) + Tlv(0x71, longest))
+            assert command(emulator, 0xA1, data=b"\x01") == bytes((0x72, 255, 0x21)) + longest + b"\x00"
+            command(emulator, 5, data=Tlv(0x71, longest) + Tlv(0x71, b"z" * 254), expected=0x6700)
+            assert oath_calculate(emulator, longest) == calculated
+            command(emulator, 5, data=Tlv(0x71, longest) + Tlv(0x71, old_name))
+            assert oath_calculate(emulator, old_name) == calculated
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -221,6 +245,7 @@ CASES = {
     "r5-05": r5_05,
     "r6-04": r6_04,
     "r6-05": r6_05,
+    "r4-05": r4_05,
 }
 
 
