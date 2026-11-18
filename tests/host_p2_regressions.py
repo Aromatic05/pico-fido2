@@ -2,14 +2,15 @@
 """P2 regressions against the product Host emulator, never physical devices."""
 
 import argparse
+import hashlib
 import hmac
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from yubikit.core import Tlv
 
-from host_p1_regressions import OPENPGP_AID, P256_IMPORT, P256_SIG, command, flash_record, openpgp, running
-from host_powercycle_durability import OATH_AID
+from host_p1_regressions import OPENPGP_AID, P256_IMPORT, P256_SIG, command, ctap_error, flash_record, openpgp, running
+from host_powercycle_durability import OATH_AID, open_fido
 from host_protocol_smoke import tlv_value
 
 
@@ -288,6 +289,46 @@ def r5_08(binary):
                 assert command(emulator, 0xA1) == b""
 
 
+def r2_06(binary):
+    from fido2 import cbor
+    from fido2.ctap import CtapError
+    from fido2.ctap2 import ClientPin, LargeBlobs
+    from fido2.ctap2.pin import PinProtocolV2
+
+    with TemporaryDirectory(prefix="p2-large-blob-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                pin = ClientPin(ctap)
+                pin.set_pin("Security42")
+                protocol = PinProtocolV2()
+                token = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.LARGE_BLOB_WRITE)
+
+                def write(fragment, offset, length=None):
+                    message = b"\xff" * 32 + b"\x0c\x00" + offset.to_bytes(4, "little") + hashlib.sha256(fragment).digest()
+                    ctap.large_blobs(offset, set=fragment, length=length, pin_uv_protocol=2,
+                                     pin_uv_param=protocol.authenticate(token, message))
+
+                content = [{1: b"p2-test"}]
+                serialized = cbor.encode(content)
+                data = serialized + hashlib.sha256(serialized).digest()[:16]
+                write(data[:8], 0, len(data))
+                ctap_error(CtapError.ERR.PUAT_REQUIRED, ctap.large_blobs, 0, set=b"\x80", length=17)
+                write(data[8:], 8)
+                assert LargeBlobs(ctap).read_blob_array() == content
+                empty = cbor.encode([])
+                minimum = empty + hashlib.sha256(empty).digest()[:16]
+                corrupt = minimum[:-1] + bytes((minimum[-1] ^ 1,))
+                ctap_error(CtapError.ERR.INTEGRITY_FAILURE, write, corrupt, 0, len(corrupt))
+                assert ctap.large_blobs(0, get=len(data))[1] == data
+                write(minimum, 0, len(minimum))
+        with running(binary, directory):
+            device, ctap = open_fido()
+            with device:
+                assert ctap.large_blobs(0, get=len(data))[1] == minimum
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -298,6 +339,7 @@ CASES = {
     "r6-05": r6_05,
     "r4-05": r4_05,
     "r5-08": r5_08,
+    "r2-06": r2_06,
 }
 
 
