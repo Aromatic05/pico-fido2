@@ -55,9 +55,32 @@ def r5_06(binary):
         public.verify(piv.sign(slot, key_type, message, hashes.SHA256()), message, ec.ECDSA(hashes.SHA256()))
 
 
+def r6_03(binary):
+    with TemporaryDirectory(prefix="p2-piv-pin-length-") as tmp:
+        directory = Path(tmp)
+        pin = b"123456\xff\xff"
+        puk = b"12345678"
+        new_pin = b"654321\xff\xff"
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A000000308"))
+            for length in (256, 264):
+                new_value = b"1" * length
+                command(emulator, 0x24, p2=0x80, data=pin + new_value, expected=0x6700)
+                command(emulator, 0x24, p2=0x81, data=puk + new_value, expected=0x6700)
+                command(emulator, 0x2C, p2=0x80, data=puk + new_value, expected=0x6700)
+            command(emulator, 0x20, p2=0x80, data=pin)
+            command(emulator, 0x24, p2=0x80, data=pin + new_pin)
+            command(emulator, 0x20, p2=0x80, data=new_pin)
+            command(emulator, 0x2C, p2=0x80, data=puk + pin)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=bytes.fromhex("A000000308"))
+            command(emulator, 0x20, p2=0x80, data=pin)
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
+    "r6-03": r6_03,
 }
 
 
