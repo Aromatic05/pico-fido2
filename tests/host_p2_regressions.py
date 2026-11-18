@@ -237,6 +237,57 @@ def r4_05(binary):
             assert oath_calculate(emulator, old_name) == calculated
 
 
+def r5_08(binary):
+    with TemporaryDirectory(prefix="p2-oath-delete-") as tmp:
+        directory = Path(tmp)
+        name = b"delete-fault"
+        fault = {"PICO_KEYS_EMU_FAIL_FLASH_CLEAR_FID_ONCE": "0xba00"}
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            oath_put(emulator, name)
+        with running(binary, directory, fault) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            command(emulator, 2, data=Tlv(0x71, name), expected=0x6400)
+            assert "PICO_KEYS_EMU_FLASH_CLEAR_FAULT fid=0xba00" in emulator.log_path.read_text()
+            assert command(emulator, 0xA1) == Tlv(0x72, b"\x21" + name)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            assert command(emulator, 0xA1) == Tlv(0x72, b"\x21" + name)
+            command(emulator, 2, data=Tlv(0x71, name))
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            assert command(emulator, 0xA1) == b""
+
+    def authenticate(emulator):
+        selected = command(emulator, 0xA4, 4, data=OATH_AID)
+        challenge = tlv_value(selected, 0x74)
+        command(emulator, 0xA1, expected=0x6982)
+        response = hmac.digest(OATH_SECRET, challenge, "sha1")
+        command(emulator, 0xA3, data=Tlv(0x75, response) + Tlv(0x74, OATH_CHALLENGE))
+
+    for payload in (b"", Tlv(0x73, b"")):
+        with TemporaryDirectory(prefix="p2-oath-clear-code-") as tmp:
+            directory = Path(tmp)
+            fault = {"PICO_KEYS_EMU_FAIL_FLASH_CLEAR_FID_ONCE": "0xbaff"}
+            response = hmac.digest(OATH_SECRET, OATH_CHALLENGE, "sha1")
+            setup = Tlv(0x73, b"\x21" + OATH_SECRET) + Tlv(0x74, OATH_CHALLENGE) + Tlv(0x75, response)
+            with running(binary, directory) as emulator:
+                command(emulator, 0xA4, 4, data=OATH_AID)
+                command(emulator, 3, data=setup)
+            with running(binary, directory, fault) as emulator:
+                authenticate(emulator)
+                command(emulator, 3, data=payload, expected=0x6400)
+                assert "PICO_KEYS_EMU_FLASH_CLEAR_FAULT fid=0xbaff" in emulator.log_path.read_text()
+                command(emulator, 0xA4, 4, data=OATH_AID)
+                command(emulator, 0xA1, expected=0x6982)
+            with running(binary, directory) as emulator:
+                authenticate(emulator)
+                command(emulator, 3, data=payload)
+            with running(binary, directory) as emulator:
+                command(emulator, 0xA4, 4, data=OATH_AID)
+                assert command(emulator, 0xA1) == b""
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -246,6 +297,7 @@ CASES = {
     "r6-04": r6_04,
     "r6-05": r6_05,
     "r4-05": r4_05,
+    "r5-08": r5_08,
 }
 
 
