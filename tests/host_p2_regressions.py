@@ -2,11 +2,14 @@
 """P2 regressions against the product Host emulator, never physical devices."""
 
 import argparse
+import hmac
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from yubikit.core import Tlv
 
 from host_p1_regressions import OPENPGP_AID, P256_IMPORT, P256_SIG, command, flash_record, openpgp, running
+from host_powercycle_durability import OATH_AID
 from host_protocol_smoke import tlv_value
 
 
@@ -181,6 +184,35 @@ def r6_04(binary):
                 verify_openpgp_signature(emulator, new_public)
 
 
+OATH_SECRET = b"p2-test-oath-secret!"
+OATH_CHALLENGE = bytes(range(8))
+
+
+def oath_put(emulator, name):
+    command(emulator, 1, data=Tlv(0x71, name) + Tlv(0x73, b"\x21\x06" + OATH_SECRET))
+
+
+def oath_calculate(emulator, name, expected=0x9000):
+    return command(emulator, 0xA2, data=Tlv(0x71, name) + Tlv(0x74, OATH_CHALLENGE), expected=expected)
+
+
+def r6_05(binary):
+    with TemporaryDirectory(prefix="p2-oath-rename-prefix-") as tmp:
+        directory = Path(tmp)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            oath_put(emulator, b"foo")
+            command(emulator, 5, data=Tlv(0x71, b"foo") * 2, expected=0x6700)
+            command(emulator, 5, data=Tlv(0x71, b"foo") + Tlv(0x71, b"foobar"))
+            assert command(emulator, 0xA1) == Tlv(0x72, b"\x21foobar")
+            oath_calculate(emulator, b"foo", expected=0x6984)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OATH_AID)
+            assert oath_calculate(emulator, b"foobar") == Tlv(
+                0x75, b"\x06" + hmac.digest(OATH_SECRET, OATH_CHALLENGE, "sha1")
+            )
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -188,6 +220,7 @@ CASES = {
     "r6-02": r6_02,
     "r5-05": r5_05,
     "r6-04": r6_04,
+    "r6-05": r6_05,
 }
 
 
