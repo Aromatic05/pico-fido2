@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from host_p1_regressions import command, running
+from host_p1_regressions import OPENPGP_AID, command, running
 from host_protocol_smoke import tlv_value
 
 
@@ -77,10 +77,33 @@ def r6_03(binary):
             command(emulator, 0x20, p2=0x80, data=pin)
 
 
+def r6_02(binary):
+    with TemporaryDirectory(prefix="p2-openpgp-pin-length-") as tmp:
+        directory = Path(tmp)
+        pw1, pw3, rc = b"123456", b"12345678", b"87654321"
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OPENPGP_AID)
+            for length in (128, 256):
+                new_value = b"1" * length
+                command(emulator, 0x24, p2=0x81, data=pw1 + new_value, expected=0x6700)
+                command(emulator, 0x24, p2=0x83, data=pw3 + new_value, expected=0x6700)
+                command(emulator, 0x20, p2=0x83, data=pw3)
+                command(emulator, 0x2C, 2, 0x81, new_value, expected=0x6700)
+                command(emulator, 0xDA, p2=0xD3, data=new_value, expected=0x6700)
+            command(emulator, 0xDA, p2=0xD3, data=rc)
+            command(emulator, 0x2C, p2=0x81, data=rc + b"1" * 256, expected=0x6700)
+            command(emulator, 0x24, p2=0x81, data=pw1 + b"2" * 127)
+        with running(binary, directory) as emulator:
+            command(emulator, 0xA4, 4, data=OPENPGP_AID)
+            command(emulator, 0x20, p2=0x81, data=b"2" * 127)
+            command(emulator, 0x20, p2=0x83, data=pw3)
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
     "r6-03": r6_03,
+    "r6-02": r6_02,
 }
 
 
