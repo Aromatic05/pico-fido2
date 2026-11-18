@@ -329,6 +329,38 @@ def r2_06(binary):
                 assert ctap.large_blobs(0, get=len(data))[1] == minimum
 
 
+def r3_08(binary):
+    from fido2.ctap import CtapError
+    from fido2.ctap2 import ClientPin, LargeBlobs
+    from fido2.ctap2.pin import PinProtocolV2
+
+    with TemporaryDirectory(prefix="p2-make-credential-token-") as tmp, running(binary, Path(tmp)):
+        device, ctap = open_fido()
+        with device:
+            pin = ClientPin(ctap)
+            pin.set_pin("Security42")
+            protocol = PinProtocolV2()
+            rp = "p2.invalid"
+            permissions = ClientPin.PERMISSION.MAKE_CREDENTIAL | ClientPin.PERMISSION.LARGE_BLOB_WRITE
+            token = pin.get_pin_token("Security42", permissions=permissions, permissions_rpid=rp)
+
+            def register(token, user_id):
+                digest = hashlib.sha256(user_id).digest()
+                return ctap.make_credential(digest, {"id": rp}, {"id": user_id}, [{"type": "public-key", "alg": -7}],
+                                            pin_uv_param=protocol.authenticate(token, digest), pin_uv_protocol=2)
+
+            first = register(token, b"first")
+            assert first.auth_data.is_user_present() and first.auth_data.is_user_verified()
+            ctap_error(CtapError.ERR.PIN_AUTH_INVALID, register, token, b"second")
+            content = [{1: b"lbw-retained"}]
+            LargeBlobs(ctap, protocol, token).write_blob_array(content)
+            assert LargeBlobs(ctap).read_blob_array() == content
+            fresh = pin.get_pin_token("Security42", permissions=ClientPin.PERMISSION.MAKE_CREDENTIAL,
+                                      permissions_rpid=rp)
+            second = register(fresh, b"second")
+            assert second.auth_data.credential_data.credential_id != first.auth_data.credential_data.credential_id
+
+
 CASES = {
     "r5-07": r5_07,
     "r5-06": r5_06,
@@ -340,6 +372,7 @@ CASES = {
     "r4-05": r4_05,
     "r5-08": r5_08,
     "r2-06": r2_06,
+    "r3-08": r3_08,
 }
 
 
